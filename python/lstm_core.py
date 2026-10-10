@@ -35,7 +35,7 @@ import pandas as pd
 # Constantes (identicas a lstm.h / seq.h)
 # ---------------------------------------------------------------------
 N_IN = 3
-N_H = 16
+N_H = 8
 N_D = 8
 N_OUT = 5
 T = 50                     # pasos de la secuencia
