@@ -1,7 +1,6 @@
 # TemporalPatterns — LSTM en el S32K312
 
-Evolución de *StaticPatterns* (MLP 9-8-6-4 sobre estadísticas de una ventana) a una red recurrente que
-clasifica **gestos temporales** de los 3 potenciómetros y fija la referencia del PI de velocidad.
+Red recurrente que clasifica **gestos temporales** de los 3 potenciómetros y fija la referencia del PI de velocidad.
 Se conservan el hardware, el planificador por DWT, el protocolo UART, el PI, la telemetría y la
 máquina de estados IDLE / RUN / FIXEDREF / OPENLOOP.
 
