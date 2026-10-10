@@ -42,8 +42,8 @@ def extract_features(csv_path):
     """CSV -> DataFrame -> una fila por ventana con [average, rms, max, var] y label."""
     df = pd.read_csv(csv_path)
     rows = []
-    for wid, g in df.groupby("id"):
-        v = g[["val1", "val2", "val3"]].to_numpy().ravel()   # señal de la ventana
+    for wid, g in df.groupby("sample_id"):
+        v = g[["p1", "p2", "p3"]].to_numpy().ravel()   # señal de la ventana
         rows.append({
             "average": v.mean(),
             "rms": np.sqrt(np.mean(v ** 2)),
@@ -195,7 +195,7 @@ def plot_history(hist):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("csv", type=str, default="dataset\muestras_sinteticas_info.csv")
+    ap.add_argument("csv", type=str, default="dataset/dataset_balanceado_500.csv")
     ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--lr", type=float, default=0.5)
     ap.add_argument("--batch", type=int, default=32)
