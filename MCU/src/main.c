@@ -1,43 +1,44 @@
 /*==================================================================================================
-* Project : StaticPatterns  (deteccion de patrones estaticos + control PI de velocidad un motor DC)
+* Project : TemporalPatterns  (clasificacion de patrones temporales con LSTM + control PI de
+*                             velocidad de un motor DC)
 * Platform : S32K312 (Cortex-M7 @ 120 MHz), RTD 7.0.0
 * Author   : Ivan Delgado Ramos
-* Date     : 25/09/26
+* Date     : 09/10/26
 *
-* Descripción de Hardware...
-*   - 3 potenciometros por ADC0 con res 12 bits (P0, P1, P2 de presición)      -> entradas del clasificador (patrones estáticos)
-*   - encoder en cuadratura (x4) por EIRQ 3 / EIRQ 8    -> obtencion de velocidad del motor
-*   - 2 PWM eMIOS1 ch9 / ch10  -> LPWM y RPWM de driver BT7960
-*   - ANN estática con back propagation, topología 9-8-6-4 entrenada  por LPUART6 con buffer asincrónico
+* Basado en StaticPatterns (MLP 9-8-6-4): se conservan el hardware, el planificador por DWT, el
+* protocolo UART, el PI, la telemetria y la maquina de estados. Cambia el clasificador:
 *
-* Máquina de estados parseada por UART:
-*   IDLE      : motor apagado, para entrenamiento (T/V), reset (R),
-*               envío de pesos finales (W) y captura de dataset con valores reales de los pots (C).
-*   RUN       : inferencia sobre referencia al PI con los potes reales (solo forward)
+*   - 3 potenciometros por ADC0 (12 b) -> promedio de 100 ms -> secuencia de 50 pasos (5 s)
+*   - LSTM(16) -> Dense(8, tanh) -> Dense(5) + softmax, entrenada en el micro con BPTT y
+*     perdida de suma de errores al cuadrado (ver lstm.h)
+*   - 5 clases:  0 default (clase 5 del enunciado, ref 0)   1 alta CW   2 nominal CW
+*                3 alta CCW                                 4 nominal CCW
+*   - encoder en cuadratura (x4) por EIRQ 3 / EIRQ 8   -> velocidad del motor
+*   - 2 PWM eMIOS1 ch9 / ch10 -> LPWM y RPWM del driver BTS7960
+*
+* Maquina de estados parseada por UART:
+*   IDLE      : motor apagado. Entrenamiento (Q/T/V), reset (R), volcado (W) y carga (L) de pesos,
+*               captura de la ventana real de los potes (C).
+*   RUN       : inferencia en tiempo real sobre la ventana de los potes -> referencia del PI.
 *               Envia telemetria cada 10 ms.
 *   FIXEDREF  : PI con referencia fija enviada por la PC (pruebas de escalon).
 *   OPENLOOP  : duty fijo sin lazo (identificacion de la planta).
 *
-* Determinismo: se tiene un tick de 5 ms definido con el contador de ciclos DWT (sin interrupción.
-* Cada tick muestrea el ADC y alimenta el
-* preprocesado; el PI corre cada 2 ticks (10 ms) y el clasificador cada 10
-* ticks (50 ms).
+* Determinismo: tick de 5 ms con el contador de ciclos DWT (sin interrupcion). Cada tick muestrea
+* el ADC y alimenta la secuencia (un paso nuevo cada 20 ticks = 100 ms). El PI corre cada 2 ticks
+* (10 ms). La inferencia de la LSTM (50 pasos, ~ms) NO cabe holgada en un tick, asi que se reparte:
+* con cada paso nuevo se toma una copia de la ventana y se procesan LSTM_STEPS_PER_TICK pasos por
+* tick; a los 10 ticks (50 ms) se evalua la cabeza densa y se clasifica. Una clasificacion cada
+* 100 ms, sin perder ticks.
 *
-* Protocolo UART (115200 8N1, lineas terminadas en '\n'). Los floats viajan
-* como 8 digitos hex del patron IEEE-754 para que PC y MCU usen exactamente
-* el mismo float32:
-*   T,<h0>,...,<h8>,<c>   entrena una muestra (c = 0..3)
-*   V,<h0>,...,<h8>,<c>   evalua sin actualizar pesos
-*        respuesta: <cls>,<p0>,<p1>,<p2>,<p3>,<loss>,<cicF>,<cicB>
-*   R                     recarga pesos iniciales            -> OK
-*   W                     vuelca los 162 parametros (hex)    -> W,... / END
-*   C                     captura: <r0>,<r1>,<r2>,<f0..f8 hex>   (o N si no hay ventana)
+* Protocolo UART (115200 8N1, lineas terminadas en '\n'):
+*   comandos de entrenamiento y pesos: ver app_cmd.h  (Q T V R W L G C)
 *   I                     entra a RUN                         -> OK + telemetria
 *   F,<rpm>               entra a FIXEDREF con esa referencia -> OK + telemetria
 *   O,<permil>            entra a OPENLOOP con duty +-1000    -> OK + telemetria
 *   X                     vuelve a IDLE (motor apagado)       -> OK
 *   P,<kp*1e6>,<ki*1e6>   cambia ganancias del PI             -> OK
-*   S,<rpm>               cambia la magnitud de la referencia -> OK
+*   S,<alta>,<nominal>    cambia las referencias en rpm       -> OK
 *   Telemetria: D,<t_ms>,<clsRaw>,<cls>,<ref>,<rpm*10>,<u*1000>,<r0>,<r1>,<r2>,
 *               <pmax*1000>,<carga*1000>,<cicF>
 ==================================================================================================*/
@@ -45,8 +46,10 @@
 #ifdef __cplusplus
 extern "C"{
 #endif
-#define USE_PRETRAINED //Preprocesor statement para emplear los pesos volcados
-						//(despues de entrenar)
+/* Descomentar cuando exista pesos_entrenados.h generado por run_mcu.py: el binario arranca con la
+ * red entrenada y en modo RUN. Sin recompilar, cargar_pesos.py hace lo mismo por UART.          */
+/* #define USE_PRETRAINED */
+
 #include "Clock_Ip.h"
 #include "Siul2_Port_Ip.h"
 #include "Emios_Mcl_Ip.h"
@@ -60,19 +63,20 @@ extern "C"{
 #include <string.h>
 #include <math.h>
 
-#include "preproc.h" //Header con definiciones para procesar los datos de los pots
-#include "mlp.h" //Header con definiciones para construir la ANN
-#include "pi_ctrl.h" //Header con las definiciones del control
-#include "pesos_iniciales.h" //Pesos iniciales
+#include "seq.h"              /* secuencia de los potes (ventana de 50 pasos) */
+#include "lstm.h"             /* red LSTM                                     */
+#include "app_cmd.h"          /* comandos de entrenamiento / pesos / captura  */
+#include "pi_ctrl.h"          /* control PI                                   */
+#include "pesos_iniciales.h"  /* LSTM_W_INIT                                  */
 #ifdef USE_PRETRAINED
-#include "pesos_entrenados.h"   //Pesos generados despues de entrenar
+#include "pesos_entrenados.h" /* LSTM_W_TRAINED                               */
 #endif
 
 /*======================================= Configuracion ==========================================*/
 /* --- Instancias y canales de perifericos --- */
 #define UART_INSTANCE        6U
 #define UART_TIMEOUT_US      100000U
-#define BUFFER_SIZE          256U //tamaño del buffer
+#define BUFFER_SIZE          256U    /* una trama Q ocupa ~232 B */
 #define ADC_SAR_USED_CH      0U
 #define ADC_SAR_USED_CH2     1U
 #define ADC_SAR_USED_CH3     2U
@@ -81,7 +85,7 @@ extern "C"{
 #define PWM_INSTANCE         1U
 #define PWM_CH_CW            9U
 #define PWM_CH_CCW           10U
-#define PWM_PERIOD           65534U  //cuentas máximas del pwm
+#define PWM_PERIOD           65534U
 
 /* --- DWT (contador de ciclos) --- */
 #define DWT_LAR     (*(volatile uint32 *)0xE0001FB0UL)
@@ -93,33 +97,35 @@ extern "C"{
 /* --- Temporizacion --- */
 #define TICK_MS              5U
 #define TICK_CYC             (CORE_MHZ * 1000U * TICK_MS)
-#define CTRL_DIV             2U      /* PI cada 10 ms          */
-#define CLS_DIV              10U     /* clasificador cada 50 ms */
-#define LOAD_WIN_TICKS       200U    /* ventana de carga: 1 s  */
+#define CTRL_DIV             2U      /* PI cada 10 ms                               */
+#define LSTM_STEPS_PER_TICK  5U      /* 50 pasos / 5 = 10 ticks = 50 ms por inferencia */
+#define LOAD_WIN_TICKS       200U    /* ventana de carga de CPU: 1 s                */
 #define TS_CTRL              ((float32)(TICK_MS * CTRL_DIV) * 1e-3f)
 
 /* --- Encoder y motor --- */
-#define ENC_CPR              3332.0f /* cuentas por vuelta del eje de salida en x4
-                                        (p. ej. 17 PPR x 4 x reduccion 49)       */
-#define ENC_SIGN             1       /* -1 si CW da cuentas negativas            */
-#define RPM_LPF_ALPHA        0.5f    /* filtro de primer orden de la velocidad   */
-#define U_DEADZONE           0.0f    /* compensacion de zona muerta (0 = off)    */
+#define ENC_CPR              3332.0f /* cuentas por vuelta del eje de salida en x4  */
+#define ENC_SIGN             1       /* -1 si CW da cuentas negativas               */
+#define RPM_LPF_ALPHA        0.5f
+#define U_DEADZONE           0.0f
 
 /* --- Control --- */
-#define PI_KP_DEFAULT        0.0040f /* duty / rpm   */
-#define PI_KI_DEFAULT        0.0500f /* duty / (rpm s)            */
+#define PI_KP_DEFAULT        0.0040f
+#define PI_KI_DEFAULT        0.0500f
 #define PI_UMAX              1.0f
-#define REF_RPM_DEFAULT      120.0f /* Para prueba escalon */
-#define REF_SLEW_RPM_S       0.0f    /* rampa de referencia (0 = escalon)         */
+#define REF_RPM_ALTA         150.0f  /* clases 1 y 3 */
+#define REF_RPM_NOMINAL      90.0f   /* clases 2 y 4 */
+#define REF_SLEW_RPM_S       0.0f    /* rampa de referencia (0 = escalon)           */
 
 /* --- Clasificador --- */
-#define LEARNING_RATE        0.05f
-#define CONF_THRESHOLD       0.70f   /* valor del pot menor al thres -> clase default              */
-#define DEBOUNCE_N           3U      /* clasificaciones iguales para conmutar     */
+#define CONF_THRESHOLD       0.70f   /* p_max menor -> clase default                */
+#define DEBOUNCE_N           3U      /* clasificaciones iguales (x 100 ms) para conmutar */
+#define REF_LATCH            0       /* 1: un gesto fija la referencia hasta el siguiente
+                                        gesto (default no detiene el motor; X si)  */
 #define CLS_DEFAULT          0U
-#define CLS_CW               1U
-#define CLS_CCW              2U
-#define CLS_PARO             3U
+#define CLS_ALTA_CW          1U
+#define CLS_NOM_CW           2U
+#define CLS_ALTA_CCW         3U
+#define CLS_NOM_CCW          4U
 
 typedef enum { MODE_IDLE = 0, MODE_RUN, MODE_FIXEDREF, MODE_OPENLOOP } AppMode;
 
@@ -130,67 +136,67 @@ volatile uint16  data;
 volatile uint16  data2;
 volatile uint16  data3;
 
-/* Encoder (32 bits: lectura atomica en M7 y sin desborde practico) */
+/* Encoder */
 volatile sint32  count = 0;
-volatile uint32 duty = 0;
+volatile uint32  duty = 0;
 /* UART */
 volatile uint8   u8BufferIdx = 0U;
 volatile uint8   au8Buffer[BUFFER_SIZE];
 volatile uint8   bRxFlag = 0U;
 volatile uint8   bRxRearm = 0U;
-static char      txBuf[128];      /* respuestas a comandos (envio sincrono)   */
-static char      tlmBuf[128];     /* telemetria (envio asincrono)             */
-volatile uint32 uartStat = 0U;
-volatile uint32 uartErrCnt = 0U;
+static char      tlmBuf[128];     /* telemetria (envio asincrono)                */
+volatile uint32  uartStat = 0U;
+volatile uint32  uartErrCnt = 0U;
 volatile Lpuart_Uart_Ip_StatusType uartErr;
 
-
 /* Aplicacion */
-static FeatState fe;
-static MlpParams net;
-static PiCtrl    pi;
-static AppMode   mode = MODE_IDLE; //handler de estados
-static uint16    rawLast[FEAT_N_CH];
-static uint32    tickCount = 0U;
-static sint32    encPrev = 0;
-static float32   rpmFilt = 0.0f;
-static float32   refMag = REF_RPM_DEFAULT;
-static float32   refTarget = 0.0f;    /* referencia deseada               */
-static float32   refApplied = 0.0f;   /* referencia tras la rampa         */
-static float32   uOut = 0.0f;
-static float32   uOpenLoop = 0.0f;
-static uint8     clsRaw = CLS_DEFAULT, clsCand = CLS_DEFAULT, clsActive = CLS_DEFAULT; //Definicion de clases
-static uint8     candCount = 0U;
-static float32   pMaxLast = 0.0f;
-static uint32    cycFwdLast = 0U;
-static uint32    busyCyc = 0U, loadPm = 0U, overruns = 0U, tlmDrops = 0U;
+static SeqState   seq;
+static LstmParams net;
+static AppCtx     app;
+static LstmSeq    xRun;               /* copia de la ventana para la inferencia */
+static LstmRun    run;
+static uint8      inferBusy = 0U;
+static PiCtrl     pi;
+static AppMode    mode = MODE_IDLE;
+static uint16     rawLast[SEQ_N_CH];
+static uint32     tickCount = 0U;
+static sint32     encPrev = 0;
+static float32    rpmFilt = 0.0f;
+static float32    refAlta = REF_RPM_ALTA;
+static float32    refNom = REF_RPM_NOMINAL;
+static float32    refTarget = 0.0f;
+static float32    refApplied = 0.0f;
+static float32    uOut = 0.0f;
+static float32    uOpenLoop = 0.0f;
+static uint8      clsRaw = CLS_DEFAULT, clsCand = CLS_DEFAULT, clsActive = CLS_DEFAULT;
+static uint8      candCount = 0U;
+static float32    pMaxLast = 0.0f;
+static uint32     cycFwdAcc = 0U, cycFwdLast = 0U;
+static uint32     busyCyc = 0U, loadPm = 0U, overruns = 0U, tlmDrops = 0U;
 
-/*======================================= Prototipos de funciones =============================================*/
+/*======================================= Prototipos =============================================*/
 void AdcEndOfChainNotif(void);
 void EncoderANotify(void);
 void EncoderBNotify(void);
 void Uart_Callback(const uint8 HwInstance, const Lpuart_Uart_Ip_EventType Event, const void *UserData);
 
 static void    InitPeripherals(void);
-static void    LoadInitialWeights(void);
 static void    ControlTick(void);
-static void    Classify(void);
+static void    InferenceTick(uint8 newStep);
+static void    Classify(const float32 p[LSTM_N_OUT]);
 static void    UpdateReference(void);
 static void    MotorApply(float32 u);
 static void    HandleCommand(void);
 static void    SendTelemetry(void);
 static void    UartSendLine(const char *buf, uint32 n);
+static void    UartSendLineCb(const char *buf, uint32_t n);
+static uint32_t CyclesCb(void);
 static void    UartRxArm(void);
-static uint8   ParseFeatureLine(const char *s, float32 *x, uint8 *label);
-static uint8   ParseInts(const char *s, sint32 *v, uint8 nmax);
-static uint8   U32ToStr(uint32 v, char *buf);
-static uint8   I32ToStr(sint32 v, char *buf);
-static uint8   F32ToHex(float32 f, char *buf);
 static inline void   DWT_Init(void);
 static inline uint32 DWT_Cycles(void) { return DWT_CYCCNT; }
 
 /*======================================= Callbacks / ISR ========================================*/
-void AdcEndOfChainNotif(void)//Final de conversión de ADC
+void AdcEndOfChainNotif(void)
 {
     data  = Adc_Sar_Ip_GetConvData(ADCHWUNIT_0_INSTANCE, ADC_SAR_USED_CH);
     data2 = Adc_Sar_Ip_GetConvData(ADCHWUNIT_0_INSTANCE, ADC_SAR_USED_CH2);
@@ -228,13 +234,15 @@ void Uart_Callback(const uint8 HwInstance, const Lpuart_Uart_Ip_EventType Event,
             }
             break;
         case LPUART_UART_IP_EVENT_ERROR:
-        	{uint32 rem;
-        	uartStat = IP_LPUART_6->STAT;   /* bit19 OR, bit18 NF, bit17 FE, bit16 PF */
-        	uartErrCnt++;
+        {
+            uint32 rem;
+            uartStat = IP_LPUART_6->STAT;   /* bit19 OR, bit18 NF, bit17 FE, bit16 PF */
+            uartErrCnt++;
             uartErr = Lpuart_Uart_Ip_GetReceiveStatus(UART_INSTANCE, &rem);
-            bRxRearm = 1U;          /* overrun / framing: se rearma en main */
-            break;}
-        default:                    /* TX_EMPTY, END_TRANSFER: nada que hacer */
+            bRxRearm = 1U;
+            break;
+        }
+        default:
             break;
     }
     (void)UserData;
@@ -244,22 +252,31 @@ void Uart_Callback(const uint8 HwInstance, const Lpuart_Uart_Ip_EventType Event,
 /*======================================= main ===================================================*/
 int main(void)
 {
-    InitPeripherals(); //Inicializar el hardware
-    DWT_Init();//Contador del core
+    InitPeripherals();
+    DWT_Init();
 
-    Feat_Init(&fe);//locaclización de memoria para ubicar los datos de los pots
+    Seq_Init(&seq);
     Pi_Init(&pi, PI_KP_DEFAULT, PI_KI_DEFAULT, TS_CTRL, PI_UMAX);
+
+    AppCmd_Init(&app);
+    app.net = &net;
+    app.initW = LSTM_W_INIT;
+    app.seq = &seq;
+    app.rawLast = rawLast;
+    app.send = UartSendLineCb;
+    app.cycles = CyclesCb;
+
 #ifdef USE_PRETRAINED
     /* Binario autonomo: arranca con la red ya entrenada y en modo RUN */
-    Mlp_Load(&net, W1_TRAINED, B1_TRAINED, W2_TRAINED, B2_TRAINED, W3_TRAINED, B3_TRAINED);
+    Lstm_LoadFlat(&net, LSTM_W_TRAINED);
     mode = MODE_RUN;
 #else
-    LoadInitialWeights();
+    Lstm_LoadFlat(&net, LSTM_W_INIT);
 #endif
     MotorApply(0.0f);
-    UartRxArm();//Armar el buffer para recepción
+    UartRxArm();
 
-    uint32 tNext = DWT_Cycles() + TICK_CYC;//Stamp de tiempo con No de ciclos mas offset
+    uint32 tNext = DWT_Cycles() + TICK_CYC;
     for (;;)
     {
         /* Planificador: resta sin signo -> robusto al desborde de CYCCNT */
@@ -268,9 +285,9 @@ int main(void)
             tNext += TICK_CYC;
             if ((sint32)(DWT_Cycles() - tNext) >= 0)
             {
-                overruns++;                      /* se perdio al menos un tick */
+                overruns++;                      /* se perdio al menos un tick (p. ej. durante T) */
                 tNext = DWT_Cycles() + TICK_CYC;
-            } //funciona decente y evita configurar timer dedicado
+            }
             ControlTick();
         }
 
@@ -278,11 +295,11 @@ int main(void)
         {
             bRxFlag = 0U;
             uint32 c0 = DWT_Cycles();
-            HandleCommand();//Parsing de las tramas enviadas por UART
+            HandleCommand();
             busyCyc += DWT_Cycles() - c0;
             UartRxArm();
         }
-        else if (bRxRearm == 1U)//Rearmar el buffer de recepcion
+        else if (bRxRearm == 1U)
         {
             bRxRearm = 0U;
             UartRxArm();
@@ -335,15 +352,10 @@ static void InitPeripherals(void)
     Lpuart_Uart_Ip_Init(UART_INSTANCE, &Lpuart_Uart_Ip_xHwConfigPB_6);
 }
 
-static void LoadInitialWeights(void)
-{
-    Mlp_Load(&net, W1_INIT, B1_INIT, W2_INIT, B2_INIT, W3_INIT, B3_INIT);
-}
-
 static inline void DWT_Init(void)
 {
     CORE_DEMCR |= (1UL << 24);      /* TRCENA */
-    DWT_LAR     = 0xC5ACCE55UL;     /* desbloqueo de dwt */
+    DWT_LAR     = 0xC5ACCE55UL;
     DWT_CYCCNT  = 0U;
     DWT_CTRL   |= 1UL;              /* CYCCNTENA */
 }
@@ -354,21 +366,18 @@ static void ControlTick(void)
     uint32 c0 = DWT_Cycles();
     tickCount++;
 
-    /* 1) Muestreo de los 3 potes (conversion unica, ~us) */
+    /* 1) Muestreo de los 3 potes */
     notif_triggered = FALSE;
     (void)Adc_Sar_Ip_StartConversion(ADCHWUNIT_0_INSTANCE, ADC_SAR_IP_CONV_CHAIN_NORMAL);
     uint32 to = ADC_WAIT_MAX;
     while ((notif_triggered != TRUE) && (to > 0U)) { to--; }
     rawLast[0] = data; rawLast[1] = data2; rawLast[2] = data3;
 
-    /* 2) Preprocesado: media movil + ventana */
-    Feat_Push(&fe, rawLast, NULL);
+    /* 2) Secuencia: promedio de 100 ms y ventana de 50 pasos */
+    uint8 newStep = Seq_PushRaw(&seq, rawLast);
 
-    /* 3) Clasificacion (solo forward) cada 50 ms */
-    if (((tickCount % CLS_DIV) == 0U) && (mode != MODE_IDLE) && (Feat_Ready(&fe) == 1U))
-    {
-        Classify();
-    }
+    /* 3) Inferencia repartida en ticks (solo fuera de IDLE) */
+    if (mode != MODE_IDLE) { InferenceTick(newStep); }
 
     /* 4) Velocidad + PI cada 10 ms */
     if ((tickCount % CTRL_DIV) == 0U)
@@ -425,18 +434,37 @@ static void ControlTick(void)
     }
 }
 
-static void Classify(void)
+/* Con cada paso nuevo (100 ms) se congela la ventana y se lanza una inferencia; cada tick avanza
+ * LSTM_STEPS_PER_TICK pasos de la celda. La red no cambia en RUN (entrenar exige IDLE).        */
+static void InferenceTick(uint8 newStep)
 {
-    float32  x[FEAT_N];
-    MlpCache cache;
+    if ((newStep == 1U) && (inferBusy == 0U) && (Seq_Ready(&seq) == 1U))
+    {
+        Seq_SnapshotX(&seq, xRun);
+        Lstm_RunBegin(&run);
+        cycFwdAcc = 0U;
+        inferBusy = 1U;
+    }
+    if (inferBusy == 1U)
+    {
+        uint32 c0 = DWT_Cycles();
+        float32 p[LSTM_N_OUT];
+        uint8 done = Lstm_RunSteps(&net, &run, xRun, LSTM_STEPS_PER_TICK);
+        if (done == 1U) { Lstm_RunHead(&net, &run, p); }
+        cycFwdAcc += DWT_Cycles() - c0;
+        if (done == 1U)
+        {
+            cycFwdLast = cycFwdAcc;
+            inferBusy = 0U;
+            Classify(p);
+        }
+    }
+}
 
-    Feat_Compute(&fe, x);
-    uint32 c0 = DWT_Cycles();
-    Mlp_Forward(&net, x, &cache);
-    cycFwdLast = DWT_Cycles() - c0;
-
-    uint8 k = Mlp_Argmax(&cache);
-    pMaxLast = cache.p[k];
+static void Classify(const float32 p[LSTM_N_OUT])
+{
+    uint8 k = Lstm_Argmax(p);
+    pMaxLast = p[k];
     clsRaw = (pMaxLast >= CONF_THRESHOLD) ? k : CLS_DEFAULT;
 
     /* Antirrebote: la clase activa solo cambia tras DEBOUNCE_N votos iguales */
@@ -444,6 +472,7 @@ static void Classify(void)
     else { clsCand = clsRaw; candCount = 1U; }
     if ((candCount >= DEBOUNCE_N) && (clsActive != clsCand))
     {
+        if ((REF_LATCH != 0) && (clsCand == CLS_DEFAULT)) { return; }   /* se mantiene el gesto */
         clsActive = clsCand;
         if (clsActive == CLS_DEFAULT) { Pi_Reset(&pi); }
     }
@@ -453,10 +482,11 @@ static void UpdateReference(void)
 {
     switch (clsActive)
     {
-        case CLS_CW:   refTarget =  refMag; break;
-        case CLS_CCW:  refTarget = -refMag; break;
-        case CLS_PARO: refTarget =  0.0f;   break;
-        default:       refTarget =  0.0f;   break;
+        case CLS_ALTA_CW:  refTarget =  refAlta; break;
+        case CLS_NOM_CW:   refTarget =  refNom;  break;
+        case CLS_ALTA_CCW: refTarget = -refAlta; break;
+        case CLS_NOM_CCW:  refTarget = -refNom;  break;
+        default:           refTarget =  0.0f;    break;
     }
     if (REF_SLEW_RPM_S > 0.0f)
     {
@@ -492,86 +522,34 @@ static void MotorApply(float32 u)
 }
 
 /*======================================= Comandos UART ==========================================*/
+static void ResetClassifier(void)
+{
+    clsRaw = CLS_DEFAULT; clsCand = CLS_DEFAULT; clsActive = CLS_DEFAULT; candCount = 0U;
+    inferBusy = 0U;
+    refApplied = 0.0f;
+}
+
 static void HandleCommand(void)
 {
     au8Buffer[u8BufferIdx] = 0U;               /* termina la cadena en '\n' */
     const char *s = (const char *)au8Buffer;
-    uint8 n = 0U;
+
+    /* Entrenamiento, pesos y captura: modulo portable compartido con el gemelo de PC */
+    app.idle = (mode == MODE_IDLE) ? 1U : 0U;
+    if (AppCmd_Handle(&app, s) == 1U) { return; }
 
     switch (s[0])
     {
-        case 'T':
-        case 'V':
-        {
-            float32 x[FEAT_N];
-            uint8   label;
-            if ((mode != MODE_IDLE) || (ParseFeatureLine(&s[2], x, &label) == 0U))
-            {
-                UartSendLine("E\n", 2U);
-                break;
-            }
-            MlpCache c;
-            uint32 c0 = DWT_Cycles();
-            Mlp_Forward(&net, x, &c);
-            uint32 c1 = DWT_Cycles();
-            float32 loss = Mlp_Loss(&c, label);     /* perdida ANTES de actualizar */
-            if (s[0] == 'T') { Mlp_Backward(&net, x, &c, label, LEARNING_RATE); }
-            uint32 c2 = DWT_Cycles();
-
-            txBuf[n++] = (char)('0' + Mlp_Argmax(&c));
-            for (uint8 j = 0U; j < MLP_N_OUT; j++) { txBuf[n++] = ','; n += F32ToHex(c.p[j], &txBuf[n]); }
-            txBuf[n++] = ','; n += F32ToHex(loss, &txBuf[n]);
-            txBuf[n++] = ','; n += U32ToStr(c1 - c0, &txBuf[n]);
-            txBuf[n++] = ','; n += U32ToStr((s[0] == 'T') ? (c2 - c1) : 0U, &txBuf[n]);
-            txBuf[n++] = '\n';
-            UartSendLine(txBuf, n);
-            break;
-        }
-        case 'R':
-            LoadInitialWeights();
-            UartSendLine("OK\n", 3U);
-            break;
-        case 'W':
-            for (uint16 i = 0U; i < MLP_N_PARAMS; i += 8U)
-            {
-                n = 0U;
-                txBuf[n++] = 'W'; txBuf[n++] = ',';
-                n += U32ToStr(i, &txBuf[n]);
-                for (uint16 k = i; (k < (i + 8U)) && (k < MLP_N_PARAMS); k++)
-                {
-                    txBuf[n++] = ','; n += F32ToHex(Mlp_GetParam(&net, k), &txBuf[n]);
-                }
-                txBuf[n++] = '\n';
-                UartSendLine(txBuf, n);
-            }
-            UartSendLine("END\n", 4U);
-            break;
-        case 'C':
-        {
-            if (Feat_Ready(&fe) == 0U) { UartSendLine("N\n", 2U); break; }
-            float32 x[FEAT_N];
-            Feat_Compute(&fe, x);
-            for (uint8 ch = 0U; ch < FEAT_N_CH; ch++)
-            {
-                if (ch > 0U) { txBuf[n++] = ','; }
-                n += U32ToStr(rawLast[ch], &txBuf[n]);
-            }
-            for (uint8 j = 0U; j < FEAT_N; j++) { txBuf[n++] = ','; n += F32ToHex(x[j], &txBuf[n]); }
-            txBuf[n++] = '\n';
-            UartSendLine(txBuf, n);
-            break;
-        }
         case 'I':
             Pi_Reset(&pi);
-            clsCand = CLS_DEFAULT; clsActive = CLS_DEFAULT; candCount = 0U;
-            refApplied = 0.0f;
+            ResetClassifier();
             mode = MODE_RUN;
             UartSendLine("OK\n", 3U);
             break;
         case 'F':
         {
-            sint32 v[1];
-            if (ParseInts(&s[2], v, 1U) != 1U) { UartSendLine("E\n", 2U); break; }
+            int32_t v[1];  /* stdint: tipo de AppParse_Ints */
+            if (AppParse_Ints(&s[2], v, 1U) != 1U) { UartSendLine("E\n", 2U); break; }
             Pi_Reset(&pi);
             refApplied = 0.0f;
             refTarget = (float32)v[0];
@@ -581,8 +559,8 @@ static void HandleCommand(void)
         }
         case 'O':
         {
-            sint32 v[1];
-            if (ParseInts(&s[2], v, 1U) != 1U) { UartSendLine("E\n", 2U); break; }
+            int32_t v[1];  /* stdint: tipo de AppParse_Ints */
+            if (AppParse_Ints(&s[2], v, 1U) != 1U) { UartSendLine("E\n", 2U); break; }
             if (v[0] > 1000) { v[0] = 1000; }
             if (v[0] < -1000) { v[0] = -1000; }
             uOpenLoop = (float32)v[0] * 1e-3f;
@@ -593,23 +571,29 @@ static void HandleCommand(void)
         case 'X':
             mode = MODE_IDLE;
             Pi_Reset(&pi);
+            ResetClassifier();
             uOut = 0.0f;
             MotorApply(0.0f);
             UartSendLine("OK\n", 3U);
             break;
         case 'P':
         {
-            sint32 v[2];
-            if (ParseInts(&s[2], v, 2U) != 2U) { UartSendLine("E\n", 2U); break; }
+            int32_t v[2];
+            if (AppParse_Ints(&s[2], v, 2U) != 2U) { UartSendLine("E\n", 2U); break; }
             Pi_SetGains(&pi, (float32)v[0] * 1e-6f, (float32)v[1] * 1e-6f);
             UartSendLine("OK\n", 3U);
             break;
         }
         case 'S':
         {
-            sint32 v[1];
-            if (ParseInts(&s[2], v, 1U) != 1U) { UartSendLine("E\n", 2U); break; }
-            refMag = (float32)v[0];
+            int32_t v[2];
+            if ((AppParse_Ints(&s[2], v, 2U) != 2U) || (v[0] < 0) || (v[1] < 0))
+            {
+                UartSendLine("E\n", 2U);
+                break;
+            }
+            refAlta = (float32)v[0];
+            refNom = (float32)v[1];
             UartSendLine("OK\n", 3U);
             break;
         }
@@ -630,19 +614,19 @@ static void SendTelemetry(void)
     }
     uint8 n = 0U;
     tlmBuf[n++] = 'D'; tlmBuf[n++] = ',';
-    n += U32ToStr(tickCount * TICK_MS, &tlmBuf[n]);                    tlmBuf[n++] = ',';
-    tlmBuf[n++] = (char)('0' + clsRaw);                                tlmBuf[n++] = ',';
-    tlmBuf[n++] = (char)('0' + clsActive);                             tlmBuf[n++] = ',';
-    n += I32ToStr((sint32)refApplied, &tlmBuf[n]);                     tlmBuf[n++] = ',';
-    n += I32ToStr((sint32)lroundf(rpmFilt * 10.0f), &tlmBuf[n]);       tlmBuf[n++] = ',';
-    n += I32ToStr((sint32)lroundf(uOut * 1000.0f), &tlmBuf[n]);        tlmBuf[n++] = ',';
-    for (uint8 ch = 0U; ch < FEAT_N_CH; ch++)
+    n += AppFmt_U32(tickCount * TICK_MS, &tlmBuf[n]);                     tlmBuf[n++] = ',';
+    tlmBuf[n++] = (char)('0' + clsRaw);                                   tlmBuf[n++] = ',';
+    tlmBuf[n++] = (char)('0' + clsActive);                                tlmBuf[n++] = ',';
+    n += AppFmt_I32((sint32)refApplied, &tlmBuf[n]);                      tlmBuf[n++] = ',';
+    n += AppFmt_I32((sint32)lroundf(rpmFilt * 10.0f), &tlmBuf[n]);        tlmBuf[n++] = ',';
+    n += AppFmt_I32((sint32)lroundf(uOut * 1000.0f), &tlmBuf[n]);         tlmBuf[n++] = ',';
+    for (uint8 ch = 0U; ch < SEQ_N_CH; ch++)
     {
-        n += U32ToStr(rawLast[ch], &tlmBuf[n]);                        tlmBuf[n++] = ',';
+        n += AppFmt_U32(rawLast[ch], &tlmBuf[n]);                         tlmBuf[n++] = ',';
     }
-    n += U32ToStr((uint32)lroundf(pMaxLast * 1000.0f), &tlmBuf[n]);    tlmBuf[n++] = ',';
-    n += U32ToStr(loadPm, &tlmBuf[n]);                                 tlmBuf[n++] = ',';
-    n += U32ToStr(cycFwdLast, &tlmBuf[n]);
+    n += AppFmt_U32((uint32)lroundf(pMaxLast * 1000.0f), &tlmBuf[n]);     tlmBuf[n++] = ',';
+    n += AppFmt_U32(loadPm, &tlmBuf[n]);                                  tlmBuf[n++] = ',';
+    n += AppFmt_U32(cycFwdLast, &tlmBuf[n]);
     tlmBuf[n++] = '\n';
     (void)Lpuart_Uart_Ip_AsyncSend(UART_INSTANCE, (const uint8 *)tlmBuf, (uint32)n);
 }
@@ -655,81 +639,13 @@ static void UartSendLine(const char *buf, uint32 n)
     (void)Lpuart_Uart_Ip_SyncSend(UART_INSTANCE, (const uint8 *)buf, n, UART_TIMEOUT_US);
 }
 
+static void UartSendLineCb(const char *buf, uint32_t n) { UartSendLine(buf, (uint32)n); }
+static uint32_t CyclesCb(void) { return DWT_Cycles(); }
+
 static void UartRxArm(void)
 {
     u8BufferIdx = 0U;
     (void)Lpuart_Uart_Ip_AsyncReceive(UART_INSTANCE, (uint8 *)au8Buffer, 1U);
-}
-
-/*======================================= Parsing / formato ======================================*/
-static sint8 HexVal(char c)
-{
-    if ((c >= '0') && (c <= '9')) { return (sint8)(c - '0'); }
-    if ((c >= 'A') && (c <= 'F')) { return (sint8)(c - 'A' + 10); }
-    if ((c >= 'a') && (c <= 'f')) { return (sint8)(c - 'a' + 10); }
-    return -1;
-}
-
-/* "<h0>,...,<h8>,<c>" -> x[9], label. Devuelve 1 si es valida. */
-static uint8 ParseFeatureLine(const char *s, float32 *x, uint8 *label)
-{
-    for (uint8 j = 0U; j < FEAT_N; j++)
-    {
-        uint32 u = 0U;
-        for (uint8 k = 0U; k < 8U; k++)
-        {
-            sint8 h = HexVal(*s++);
-            if (h < 0) { return 0U; }
-            u = (u << 4) | (uint32)h;
-        }
-        if (*s++ != ',') { return 0U; }
-        (void)memcpy(&x[j], &u, sizeof(float32));
-    }
-    if ((*s < '0') || (*s > '3')) { return 0U; }
-    *label = (uint8)(*s - '0');
-    return 1U;
-}
-
-/* Lee hasta nmax enteros con signo separados por ',' */
-static uint8 ParseInts(const char *s, sint32 *v, uint8 nmax)
-{
-    uint8 cnt = 0U;
-    while ((cnt < nmax) && (*s != '\0') && (*s != '\n') && (*s != '\r'))
-    {
-        sint32 sign = 1, acc = 0;
-        uint8 digits = 0U;
-        if (*s == '-') { sign = -1; s++; }
-        while ((*s >= '0') && (*s <= '9')) { acc = (acc * 10) + (sint32)(*s - '0'); s++; digits++; }
-        if (digits == 0U) { return cnt; }
-        v[cnt++] = sign * acc;
-        if (*s == ',') { s++; }
-    }
-    return cnt;
-}
-
-static uint8 U32ToStr(uint32 v, char *buf)
-{
-    char  tmp[10];
-    uint8 n = 0U, pos = 0U;
-    if (v == 0U) { tmp[n++] = '0'; }
-    while (v > 0U) { tmp[n++] = (char)('0' + (v % 10U)); v /= 10U; }
-    while (n > 0U) { buf[pos++] = tmp[--n]; }
-    return pos;
-}
-
-static uint8 I32ToStr(sint32 v, char *buf)
-{
-    if (v < 0) { buf[0] = '-'; return (uint8)(1U + U32ToStr((uint32)(-v), &buf[1])); }
-    return U32ToStr((uint32)v, buf);
-}
-
-static uint8 F32ToHex(float32 f, char *buf)
-{
-    static const char HEX[] = "0123456789ABCDEF";
-    uint32 u;
-    (void)memcpy(&u, &f, sizeof(u));
-    for (sint8 k = 7; k >= 0; k--) { buf[7 - k] = HEX[(u >> (4 * k)) & 0xFU]; }
-    return 8U;
 }
 
 #ifdef __cplusplus
