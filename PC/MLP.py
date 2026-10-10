@@ -195,7 +195,7 @@ def plot_history(hist):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("csv")
+    ap.add_argument("csv", type=str, default="dataset\muestras_sinteticas_info.csv")
     ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--lr", type=float, default=0.5)
     ap.add_argument("--batch", type=int, default=32)
