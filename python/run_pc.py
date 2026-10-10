@@ -33,7 +33,7 @@ CLIP = 1.0
 SEED_WEIGHTS = 1
 SEED_DATA = 0
 SEED_ORDER = 7
-DATOS = "dataset_balanceado_500.csv"
+DATOS = "dataset\\dataset_balanceado_500.csv"
 FIRMWARE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "firmware")
 
 
