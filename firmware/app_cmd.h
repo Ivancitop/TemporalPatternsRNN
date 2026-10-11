@@ -13,7 +13,7 @@
 *   V,<c>                    evalua sin actualizar pesos
 *        respuesta: <cls>,<p0>,...,<p4>,<loss>,<cicF>,<cicB>
 *   R                        recarga pesos iniciales                       -> OK
-*   W                        vuelca los 1461 parametros: W,<idx>,<8 hex> / END
+*   W                        vuelca los LSTM_N_PARAMS parametros: W,<idx>,<8 hex> / END
 *   L,<idx>,<h0>[,...,<h7>]  escribe hasta 8 parametros desde idx           -> K
 *   G,<lr*1e6>,<clip*1e3>    cambia tasa de aprendizaje y recorte           -> OK
 *   C                        ventana actual de los potes:
