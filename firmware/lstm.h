@@ -1,10 +1,10 @@
 /*==================================================================================================
 * Project : TemporalPatterns
 * Platform : S32K3XX
-* Modulo   : lstm  (LSTM(16) -> Dense(8, tanh) -> Dense(5) + softmax, BPTT en el micro)
+* Modulo   : lstm  (LSTM(LSTM_N_H) -> Dense(8, tanh) -> Dense(5) + softmax, BPTT en el micro)
 *
 *   x_t (3 potes, t = 0..49, un paso cada 100 ms)
-*     -> LSTM 16 unidades (compuertas i, f, g, o; estado inicial h = c = 0)
+*     -> LSTM de LSTM_N_H unidades (compuertas i, f, g, o; estado inicial h = c = 0)
 *     -> Dense 8 neuronas, tanh, sobre el ultimo estado h_T
 *     -> Dense 5 lineal + softmax (probabilidad por clase)
 *
@@ -31,7 +31,7 @@
 #include <stdint.h>
 
 #define LSTM_N_IN   3U
-#define LSTM_N_H    16U
+#define LSTM_N_H    8U        /* 8 -> 501 parametros, 16 -> 1461 */
 #define LSTM_N_G    (4U * LSTM_N_H)   /* filas de compuertas */
 #define LSTM_N_D    8U
 #define LSTM_N_OUT  5U
@@ -39,7 +39,7 @@
 
 #define LSTM_N_PARAMS ((LSTM_N_G * LSTM_N_IN) + (LSTM_N_G * LSTM_N_H) + LSTM_N_G + \
                        (LSTM_N_D * LSTM_N_H) + LSTM_N_D +                         \
-                       (LSTM_N_OUT * LSTM_N_D) + LSTM_N_OUT)          /* = 1461 */
+                       (LSTM_N_OUT * LSTM_N_D) + LSTM_N_OUT)          /* 501 con H = 8 */
 
 /* Parametros entrenables, en el mismo orden que el volcado 'W' y que
  * LSTMNet.flat_params(). Matrices fila por neurona: W[r * n_in + i].       */
@@ -63,7 +63,7 @@ typedef struct {
     float p   [LSTM_N_OUT];           /* softmax                 */
 } LstmCache;
 
-/* Forward incremental para tiempo real: solo h y c (128 B) */
+/* Forward incremental para tiempo real: solo h y c */
 typedef struct {
     float   h[LSTM_N_H];
     float   c[LSTM_N_H];
@@ -88,7 +88,7 @@ void    Lstm_RunBegin(LstmRun *r);
 uint8_t Lstm_RunSteps(const LstmParams *n, LstmRun *r, LstmSeq x, uint8_t nsteps);
 void    Lstm_RunHead(const LstmParams *n, const LstmRun *r, float p[LSTM_N_OUT]);
 
-/* Acceso plano a los 1461 parametros (volcado / carga por UART) */
+/* Acceso plano a los LSTM_N_PARAMS parametros (volcado / carga por UART) */
 float   Lstm_GetParam(const LstmParams *n, uint16_t idx);
 void    Lstm_SetParam(LstmParams *n, uint16_t idx, float v);
 

@@ -15,11 +15,13 @@ uint8_t Seq_PushRaw(SeqState *s, const uint16_t raw[SEQ_N_CH])
     s->nAcc++;
     if (s->nAcc < SEQ_DEC) { return 0U; }
 
-    /* Promedio redondeado en milesimas, todo entero: 20 * 4095 * 1000 cabe en 32 b */
-    const uint32_t den = SEQ_DEC * SEQ_ADC_FS;
+    /* Promedio calibrado y redondeado en milesimas, todo entero (20 * 4095 * 1020 cabe en 32 b) */
+    const uint32_t off = SEQ_DEC * SEQ_ADC_MIN;
+    const uint32_t den = SEQ_DEC * (SEQ_ADC_MAX - SEQ_ADC_MIN);
     for (uint8_t ch = 0U; ch < SEQ_N_CH; ch++)
     {
-        uint32_t code = ((s->acc[ch] * SEQ_CODE_SCALE) + (den / 2U)) / den;
+        uint32_t a = (s->acc[ch] > off) ? (s->acc[ch] - off) : 0U;
+        uint32_t code = ((a * SEQ_LVL_MAX) + (den / 2U)) / den;
         if (code > SEQ_CODE_MAX) { code = SEQ_CODE_MAX; }
         s->win[s->wIdx][ch] = (uint16_t)code;
         s->acc[ch] = 0U;
@@ -59,4 +61,22 @@ void Seq_SnapshotX(const SeqState *s, LstmSeq x)
         for (uint8_t ch = 0U; ch < SEQ_N_CH; ch++) { x[t][ch] = Seq_CodeToX(s->win[k][ch]); }
         k = (uint8_t)((k + 1U) % LSTM_T);
     }
+}
+
+uint16_t Seq_WindowRange(const SeqState *s)
+{
+    uint16_t r = 0U;
+    uint8_t n = (s->wCnt < LSTM_T) ? s->wCnt : LSTM_T;
+    for (uint8_t ch = 0U; ch < SEQ_N_CH; ch++)
+    {
+        uint16_t mn = 0xFFFFU, mx = 0U;
+        for (uint8_t t = 0U; t < n; t++)
+        {
+            uint16_t v = s->win[t][ch];
+            if (v < mn) { mn = v; }
+            if (v > mx) { mx = v; }
+        }
+        if ((n > 0U) && ((uint16_t)(mx - mn) > r)) { r = (uint16_t)(mx - mn); }
+    }
+    return r;
 }

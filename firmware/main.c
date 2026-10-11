@@ -9,7 +9,7 @@
 * protocolo UART, el PI, la telemetria y la maquina de estados. Cambia el clasificador:
 *
 *   - 3 potenciometros por ADC0 (12 b) -> promedio de 100 ms -> secuencia de 50 pasos (5 s)
-*   - LSTM(16) -> Dense(8, tanh) -> Dense(5) + softmax, entrenada en el micro con BPTT y
+*   - LSTM(8) -> Dense(8, tanh) -> Dense(5) + softmax, entrenada en el micro con BPTT y
 *     perdida de suma de errores al cuadrado (ver lstm.h)
 *   - 5 clases:  0 default (clase 5 del enunciado, ref 0)   1 alta CW   2 nominal CW
 *                3 alta CCW                                 4 nominal CCW
@@ -72,6 +72,12 @@ extern "C"{
 #include "pesos_entrenados.h" /* LSTM_W_TRAINED                               */
 #endif
 
+/* Falla al compilar si un .h de pesos no corresponde a la topologia de lstm.h */
+typedef char chk_pesos_init[((sizeof(LSTM_W_INIT) / sizeof(float)) == LSTM_N_PARAMS) ? 1 : -1];
+#ifdef USE_PRETRAINED
+typedef char chk_pesos_trained[((sizeof(LSTM_W_TRAINED) / sizeof(float)) == LSTM_N_PARAMS) ? 1 : -1];
+#endif
+
 /*======================================= Configuracion ==========================================*/
 /* --- Instancias y canales de perifericos --- */
 #define UART_INSTANCE        6U
@@ -119,6 +125,9 @@ extern "C"{
 /* --- Clasificador --- */
 #define CONF_THRESHOLD       0.70f   /* p_max menor -> clase default                */
 #define DEBOUNCE_N           3U      /* clasificaciones iguales (x 100 ms) para conmutar */
+#define MOVE_GATE_MIN        40U     /* si ningun pote vario mas de esto (milesimas) en los
+                                        5 s de la ventana -> default sin consultar la red.
+                                        Potes quietos = default, como en el dataset. 0 = off */
 #define REF_LATCH            0       /* 1: un gesto fija la referencia hasta el siguiente
                                         gesto (default no detiene el motor; X si)  */
 #define CLS_DEFAULT          0U
@@ -156,6 +165,7 @@ static AppCtx     app;
 static LstmSeq    xRun;               /* copia de la ventana para la inferencia */
 static LstmRun    run;
 static uint8      inferBusy = 0U;
+static uint8      winQuiet = 0U;           /* compuerta de movimiento de la ventana en curso */
 static PiCtrl     pi;
 static AppMode    mode = MODE_IDLE;
 static uint16     rawLast[SEQ_N_CH];
@@ -441,6 +451,7 @@ static void InferenceTick(uint8 newStep)
     if ((newStep == 1U) && (inferBusy == 0U) && (Seq_Ready(&seq) == 1U))
     {
         Seq_SnapshotX(&seq, xRun);
+        winQuiet = ((MOVE_GATE_MIN > 0U) && (Seq_WindowRange(&seq) < MOVE_GATE_MIN)) ? 1U : 0U;
         Lstm_RunBegin(&run);
         cycFwdAcc = 0U;
         inferBusy = 1U;
@@ -465,7 +476,7 @@ static void Classify(const float32 p[LSTM_N_OUT])
 {
     uint8 k = Lstm_Argmax(p);
     pMaxLast = p[k];
-    clsRaw = (pMaxLast >= CONF_THRESHOLD) ? k : CLS_DEFAULT;
+    clsRaw = ((pMaxLast >= CONF_THRESHOLD) && (winQuiet == 0U)) ? k : CLS_DEFAULT;
 
     /* Antirrebote: la clase activa solo cambia tras DEBOUNCE_N votos iguales */
     if (clsRaw == clsCand) { if (candCount < 255U) { candCount++; } }
