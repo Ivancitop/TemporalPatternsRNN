@@ -172,7 +172,7 @@ def main():
     ap.add_argument("--tipo", choices=["identificar", "escalon", "demo"], default="demo")
     ap.add_argument("--puerto", default="COM6")
     ap.add_argument("--baud", type=int, default=115200)
-    ap.add_argument("--seg", type=float, default=3.0)
+    ap.add_argument("--seg", type=float, default=60.0)
     ap.add_argument("--duty", type=int, default=500)
     ap.add_argument("--rpm", type=int, default=150)
     ap.add_argument("--kp", type=float)

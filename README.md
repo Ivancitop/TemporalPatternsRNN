@@ -8,9 +8,9 @@ máquina de estados IDLE / RUN / FIXEDREF / OPENLOOP.
 
 ```
 x_t (3 potes, 50 pasos de 100 ms = 5 s)
-  -> LSTM 16 unidades (i, f, g, o)          1280 parámetros
+  -> LSTM 8 unidades (i, f, g, o)          501 parámetros
   -> Dense 8, tanh                           136
-  -> Dense 5 + softmax                        45      total 1461 (5.8 KB en float32)
+  -> Dense 5 + softmax                        45      total 501 (5.8 KB en float32)
 Pérdida: E = ½ Σ_k (p_k − t_k)²   (suma de errores al cuadrado, a través del jacobiano del softmax)
 Entrenamiento: SGD por secuencia, BPTT completo, recorte de norma global (lr 0.1, clip 1.0, 20 épocas)
 ```

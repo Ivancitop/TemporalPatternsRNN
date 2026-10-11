@@ -1,0 +1,18 @@
+{
+  "latencias": [],
+  "conteo_clase_raw": [
+    6001,
+    0,
+    0,
+    0,
+    0
+  ],
+  "deteccion_media_ms": null,
+  "accion_media_ms": null,
+  "carga_cpu_media_pct": 5.3936677220463265,
+  "carga_cpu_max_pct": 5.6000000000000005,
+  "cic_fwd_media": 520822.5579070155,
+  "fwd_us": 4340.187982558463,
+  "periodo_tlm_ms_media": 10.0,
+  "tramas_perdidas_pct": 0.0
+}
