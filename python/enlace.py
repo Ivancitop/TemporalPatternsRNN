@@ -8,7 +8,7 @@ en NumPy. Todos exponen line(cmd) -> str y lines_until(cmd, fin) -> [str].
 Funciones de alto nivel (las usan run_mcu.py, cargar_pesos.py, evaluar.py):
     cargar_secuencia(link, codes)        tramas Q (2 por secuencia)
     muestra(link, 'T'|'V', codes, y)     -> cls, p[5], loss, cic_fwd, cic_bwd, rtt
-    volcar_pesos(link)                   W  -> np.float32[1461]
+    volcar_pesos(link)                   W  -> np.float32[N_PARAMS]
     escribir_pesos(link, flat)           L  (8 parametros por linea)
 """
 
