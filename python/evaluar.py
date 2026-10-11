@@ -36,13 +36,13 @@ from run_pc import DATOS, preparar
 
 def evaluar_conjunto(nombre, C, y, net, link):
     P_pc = net.predict_proba(core.codes_to_x(C, np.float64))
-    yp_pc = con_umbral(P_pc)                        # mismo umbral que el firmware
+    yp_pc = con_umbral(P_pc, codes=C)               # umbral + compuerta, igual que el firmware
     out = {"n": int(len(y)), "cm_pc": matriz_confusion(y, yp_pc).tolist(),
            "metricas_pc": metricas_clase(matriz_confusion(y, yp_pc)), "prob_pc": P_pc.tolist()}
     print(f"[{nombre}] PC  : exactitud {100 * out['metricas_pc']['accuracy']:.1f} %  ({len(y)} secuencias)")
     if link is not None:
         P_mcu = np.array([enlace.muestra(link, "V", c, yy)[1] for c, yy in zip(C, y)])
-        yp_mcu = con_umbral(P_mcu)
+        yp_mcu = con_umbral(P_mcu, codes=C)
         M = matriz_confusion(y, yp_mcu)
         out.update({"cm_mcu": M.tolist(), "metricas_mcu": metricas_clase(M), "prob_mcu": P_mcu.tolist(),
                     "acuerdo_pc_mcu": float(np.mean(yp_mcu == yp_pc)),

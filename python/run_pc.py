@@ -22,18 +22,19 @@ import time
 import numpy as np
 
 import lstm_core as core
-from lstm_core import (LSTMNet, load_dataset, split_dataset, epoch_orders, save_json,
+from lstm_core import (LSTMNet, load_dataset, split_dataset, epoch_orders, save_json, desplazar,
                        matriz_confusion, metricas_clase, con_umbral, gradient_check)
 
 # ---------------- configuracion del experimento ----------------
 # run_mcu.py importa estas constantes: PC y MCU usan exactamente lo mismo
-EPOCHS = 20
+EPOCHS = 60
+AUMENTO = True          # desfase / velocidad / amplitud por epoca (ver lstm_core.aumentar)
 LR = 0.10
 CLIP = 1.0
 SEED_WEIGHTS = 1
 SEED_DATA = 0
 SEED_ORDER = 7
-DATOS = "dataset\\dataset_balanceado_500.csv"
+DATOS = "dataset_balanceado_500.csv"
 FIRMWARE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "firmware")
 
 
@@ -49,6 +50,8 @@ def train(net, d, orders, lr, clip=CLIP, log=True):
     t0 = time.perf_counter()
     for ep, order in enumerate(orders):
         acc = 0.0
+        if AUMENTO:
+            Xtr = core.codes_to_x(core.epoca_aumentada(d, ep), np.float64)
         for idx in order:
             p, loss = net.train_sample(Xtr[idx], Ytr[idx], lr, clip)
             acc += loss
@@ -66,18 +69,7 @@ def train(net, d, orders, lr, clip=CLIP, log=True):
     return hist
 
 
-def desplazar(codes, s):
-    """Ventana deslizante: s > 0 -> la ventana termina s pasos DESPUES del gesto
-    (los potes quedan quietos al final); s < 0 -> termina antes (quietos al inicio)."""
-    if s == 0:
-        return codes
-    if s > 0:
-        return np.concatenate([codes[s:], np.repeat(codes[-1:], s, axis=0)])
-    s = -s
-    return np.concatenate([np.repeat(codes[:1], s, axis=0), codes[:-s]])
-
-
-def robustez_desplazamiento(net, d, rango=range(-10, 11)):
+def robustez_desplazamiento(net, d, rango=range(-10, 21)):
     """Exactitud en prueba (con umbral 0.7) cuando la ventana de RUN no esta
     alineada con el gesto. Dice cuantas clasificaciones seguidas (antirrebote)
     puede esperar el firmware."""
@@ -85,11 +77,22 @@ def robustez_desplazamiento(net, d, rango=range(-10, 11)):
     for s in rango:
         C = np.array([desplazar(c, s) for c in d["C_test"]])
         P = net.predict_proba(core.codes_to_x(C, np.float64))
-        yp = con_umbral(P)
+        yp = con_umbral(P, codes=C)
         out.append({"desplazamiento": s, "ms": s * core.STEP_MS,
                     "acc": float(np.mean(yp == d["y_test"])),
-                    "acc_gestos": float(np.mean(yp[d["y_test"] != 0] == d["y_test"][d["y_test"] != 0]))})
+                    "acc_gestos": float(np.mean(yp[d["y_test"] != 0] == d["y_test"][d["y_test"] != 0])),
+                    "acc_clase": [float(np.mean(yp[d["y_test"] == c] == c)) for c in range(core.N_OUT)]})
     return out
+
+
+def quietos_default(net, d):
+    """Potes quietos 5 s en el estado inicial o final de un gesto deben dar default."""
+    ok = tot = 0
+    for g in d["C_test"][d["y_test"] != 0]:
+        for row in (g[0], g[-1]):
+            P = net.predict_proba(core.codes_to_x(np.repeat(row[None], core.T, 0)[None], np.float64))
+            ok += int(con_umbral(P)[0] == 0); tot += 1          # sin compuerta: lo decide la red
+    return f"{ok}/{tot}"
 
 
 def time_forward(net, X, reps=3):
@@ -108,7 +111,7 @@ def run(dtype, tag, d, orders):
     hist = train(net, d, orders, LR)
     _, acc_te, Pte = net.evaluate(d["X_test"], d["y_test"])
     M = matriz_confusion(d["y_test"], Pte.argmax(1))
-    Mu = matriz_confusion(d["y_test"], con_umbral(Pte))
+    Mu = matriz_confusion(d["y_test"], con_umbral(Pte, codes=d["C_test"]))
     hist.update({
         "acc_test": acc_te, "cm_test": M.tolist(), "metricas_test": metricas_clase(M),
         "cm_test_umbral": Mu.tolist(), "prob_test": Pte.tolist(),
@@ -117,8 +120,10 @@ def run(dtype, tag, d, orders):
         "config": {"epochs": EPOCHS, "lr": LR, "clip": CLIP, "dtype": np.dtype(dtype).name,
                    "seed_weights": SEED_WEIGHTS, "seed_data": SEED_DATA,
                    "seed_order": SEED_ORDER, "n_params": net.n_params(),
-                   "T": core.T, "step_ms": core.STEP_MS, "n_h": core.N_H, "n_d": core.N_D},
+                   "T": core.T, "step_ms": core.STEP_MS, "n_h": core.N_H, "n_d": core.N_D,
+                   "aumento": AUMENTO},
         "desplazamiento": robustez_desplazamiento(net, d),
+        "quietos_default": quietos_default(net, d),
     })
     print(f"  prueba: {acc_te:.1f} %   (con umbral 0.7: {100 * metricas_clase(Mu)['accuracy']:.1f} %)")
     return net, hist
@@ -161,9 +166,12 @@ def main():
     _, h32 = run(np.float32, "PC float32", d, orders)
     save_json("resultados_pc_f32.json", h32)
 
-    print("\nRobustez al desplazamiento de la ventana (float64, umbral 0.7):")
-    print("  " + "  ".join(f"{r['desplazamiento']:+d}:{100 * r['acc']:.0f}%"
-                           for r in h64["desplazamiento"]))
+    print("\nRobustez al desfase de la ventana (float64, umbral 0.7 + compuerta), exactitud por clase:")
+    print("   desfase   " + "  ".join(f"{n[:11]:>11s}" for n in core.CLASES))
+    for r in h64["desplazamiento"][::5]:
+        print(f"  {r['ms']:+6d} ms  " + "  ".join(f"{100 * a:10.0f}%" for a in r["acc_clase"]))
+    print("  Potes quietos al inicio/fin de los gestos de prueba -> default: "
+          f"{h64['quietos_default']}")
 
     os.makedirs(FIRMWARE_DIR, exist_ok=True)
     path = os.path.join(FIRMWARE_DIR, "pesos_iniciales.h")

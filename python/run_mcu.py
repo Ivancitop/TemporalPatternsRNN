@@ -35,7 +35,7 @@ import lstm_core as core
 import enlace
 from lstm_core import (LSTMNet, epoch_orders, save_json, f32_to_hex, matriz_confusion,
                        metricas_clase, con_umbral)
-from run_pc import EPOCHS, LR, CLIP, SEED_WEIGHTS, SEED_ORDER, DATOS, FIRMWARE_DIR, preparar
+from run_pc import EPOCHS, LR, CLIP, SEED_WEIGHTS, SEED_ORDER, DATOS, FIRMWARE_DIR, AUMENTO, preparar
 
 CORE_MHZ = 120.0
 
@@ -98,6 +98,8 @@ def main():
         t0 = time.perf_counter()
         for ep, order in enumerate(orders):
             acc = 0.0
+            if AUMENTO:                       # mismas secuencias aumentadas que run_pc.py
+                Ctr = core.epoca_aumentada(d, ep)
             for idx in order:
                 _, p, loss, cf, cb, rtt = enlace.muestra(link, "T", Ctr[idx], Ytr[idx])
                 acc += loss
@@ -115,7 +117,7 @@ def main():
 
         _, acc_te, Pte, _ = evaluar(link, d["C_test"], d["y_test"])
         M = matriz_confusion(d["y_test"], Pte.argmax(1))
-        Mu = matriz_confusion(d["y_test"], con_umbral(Pte))
+        Mu = matriz_confusion(d["y_test"], con_umbral(Pte, codes=d["C_test"]))
         hist.update({"acc_test": acc_te, "cm_test": M.tolist(), "metricas_test": metricas_clase(M),
                      "cm_test_umbral": Mu.tolist(), "prob_test": Pte.tolist()})
         print(f"\nExactitud en prueba: {acc_te:.1f} %  (con umbral 0.7: "

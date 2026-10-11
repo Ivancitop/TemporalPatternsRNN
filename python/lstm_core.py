@@ -35,7 +35,7 @@ import pandas as pd
 # Constantes (identicas a lstm.h / seq.h)
 # ---------------------------------------------------------------------
 N_IN = 3
-N_H = 8
+N_H = 8                    # debe coincidir con LSTM_N_H de lstm.h
 N_D = 8
 N_OUT = 5
 T = 50                     # pasos de la secuencia
@@ -49,7 +49,9 @@ SEQ_CHUNK = 25             # pasos por trama 'Q' (25 * 9 = 225 caracteres)
 # Adquisicion en tiempo real (seq.h)
 TICK_MS = 5
 SEQ_DEC = STEP_MS // TICK_MS     # 20 lecturas de ADC por paso
-ADC_FS = 2700                    # cuentas del ADC para nivel 1.0
+ADC_MIN = 11                     # crudo con el pote abajo  (SEQ_ADC_MIN)
+ADC_MAX = 2670                   # crudo con el pote arriba (SEQ_ADC_MAX)
+LVL_MAX = 1020                   # codigo asignado a ADC_MAX (SEQ_LVL_MAX)
 
 CLASES = ["Default", "Alta CW", "Nominal CW", "Alta CCW", "Nominal CCW"]
 CLASE_ENUNCIADO = [5, 1, 2, 3, 4]          # numeracion del enunciado
@@ -117,6 +119,65 @@ def split_dataset(codes, y, ids, seed=0, frac_val=0.15, frac_test=0.15):
     return d
 
 
+def desplazar(codes, s):
+    """Ventana deslizante: s > 0 -> la ventana termina s pasos DESPUES del gesto
+    (los potes quedan quietos al final); s < 0 -> termina antes (quietos al inicio)."""
+    if s == 0:
+        return codes
+    if s > 0:
+        return np.concatenate([codes[s:], np.repeat(codes[-1:], s, axis=0)])
+    s = -s
+    return np.concatenate([np.repeat(codes[:1], s, axis=0), codes[:-s]])
+
+
+# ---------------------------------------------------------------------
+# Aumento de datos: lo que ve la red en RUN y no trae el dataset
+# ---------------------------------------------------------------------
+AUG_SHIFT = (-8, 15)        # desfase de la ventana en pasos: -0.8 s .. +1.5 s
+AUG_SPEED = (0.6, 1.15)     # velocidad del gesto (0.6 -> gesto en ~3 s)
+AUG_GAIN = (0.95, 1.03)     # error de calibracion de los potes
+AUG_OFF = 15                # +- milesimas de offset
+AUG_P_DEFAULT = 0.4         # defaults reemplazados por potes quietos al inicio/fin de un gesto
+AUG_P_SALTO = 0.3           # defaults reemplazados por un acomodo rapido de los 3 potes
+AUG_P_QUIETO = 0.0          # defaults reemplazados por potes quietos en posicion aleatoria
+AUG_SEED = 3
+
+
+def aumentar(C, y, r, gestos):
+    C = np.asarray(C, dtype=float)
+    if y != 0:
+        v = r.uniform(*AUG_SPEED)
+        src = np.clip(np.arange(T) / v, 0, T - 1)
+        C = np.stack([np.interp(src, np.arange(T), C[:, k]) for k in range(N_IN)], 1)
+        C = desplazar(C, int(r.integers(AUG_SHIFT[0], AUG_SHIFT[1] + 1)))
+    else:
+        u = r.random()
+        if u < AUG_P_DEFAULT:                       # quietos donde empieza/termina un gesto
+            g = gestos[r.integers(len(gestos))]
+            C = np.repeat(g[r.choice([0, -1])][None].astype(float), T, 0)
+        elif u < AUG_P_DEFAULT + AUG_P_QUIETO:      # quietos en cualquier posicion (y extremos)
+            niv = np.where(r.random(N_IN) < 0.3, r.choice([0.0, 1020.0], N_IN),
+                           r.uniform(0, 1020, N_IN))
+            C = np.repeat(niv[None], T, 0)
+        elif u < AUG_P_DEFAULT + AUG_P_QUIETO + AUG_P_SALTO:
+            # acomodo de los potes antes de un gesto: los tres se mueven JUNTOS y rapido
+            # (0.2-0.6 s) a otra posicion, a menudo un extremo -> no es un gesto
+            ini = np.where(r.random(N_IN) < 0.3, r.choice([0.0, 1020.0], N_IN), r.uniform(0, 1020, N_IN))
+            fin = np.where(r.random(N_IN) < 0.5, r.choice([0.0, 510.0, 1020.0], N_IN), r.uniform(0, 1020, N_IN))
+            t0 = int(r.integers(0, T - 2)); n = int(r.integers(2, 7))
+            w = np.clip((np.arange(T) - t0) / n, 0, 1)[:, None]
+            C = ini[None] + w * (fin - ini)[None]
+    C = C * r.uniform(*AUG_GAIN) + r.uniform(-AUG_OFF, AUG_OFF)
+    return np.clip(np.rint(C), 0, CODE_MAX).astype(np.int64)
+
+
+def epoca_aumentada(d, ep):
+    """Codigos de entrenamiento de la epoca ep (deterministas: PC y MCU ven lo mismo)."""
+    r = np.random.default_rng(AUG_SEED * 100003 + ep)
+    gestos = d["C_train"][d["y_train"] != 0]
+    return np.array([aumentar(c, y, r, gestos) for c, y in zip(d["C_train"], d["y_train"])])
+
+
 def epoch_orders(n, epochs, seed):
     r = np.random.default_rng(seed)
     return [r.permutation(n).tolist() for _ in range(epochs)]
@@ -126,10 +187,16 @@ def epoch_orders(n, epochs, seed):
 # Gemelo de seq.c (adquisicion en tiempo real)
 # ---------------------------------------------------------------------
 def raw_to_code(acc_sum):
-    """codigo = round(1000 * suma / (SEQ_DEC * ADC_FS)), aritmetica entera."""
-    den = SEQ_DEC * ADC_FS
-    c = (np.asarray(acc_sum, dtype=np.int64) * CODE_SCALE + den // 2) // den
-    return np.minimum(c, CODE_MAX)
+    """Igual que Seq_PushRaw: suma de SEQ_DEC lecturas -> codigo calibrado (entero)."""
+    off = SEQ_DEC * ADC_MIN
+    den = SEQ_DEC * (ADC_MAX - ADC_MIN)
+    a = np.maximum(np.asarray(acc_sum, dtype=np.int64) - off, 0)
+    return np.minimum((a * LVL_MAX + den // 2) // den, CODE_MAX)
+
+
+def level_to_raw(level):
+    """Nivel del dataset -> lectura cruda esperada (para simular el ADC)."""
+    return ADC_MIN + np.asarray(level) * CODE_SCALE / LVL_MAX * (ADC_MAX - ADC_MIN)
 
 
 def raw_series_to_codes(raw):
@@ -359,10 +426,24 @@ def metricas_clase(M):
             "recall": rec.tolist(), "f1": f1.tolist(), "macro_f1": float(f1.mean())}
 
 
-def con_umbral(P, umbral=0.70):
-    """Misma decision que el firmware: si p_max < umbral -> default (0)."""
+MOVE_GATE_MIN = 40          # MOVE_GATE_MIN de main.c (milesimas; 0 desactiva)
+
+
+def ventana_quieta(codes, umbral=MOVE_GATE_MIN):
+    """Compuerta de movimiento: ningun pote vario mas de `umbral` en la ventana."""
+    c = np.asarray(codes)
+    rango = (c.max(-2) - c.min(-2)).max(-1)
+    return rango < umbral if umbral > 0 else np.zeros(rango.shape, bool)
+
+
+def con_umbral(P, umbral=0.70, codes=None):
+    """Misma decision que el firmware: si p_max < umbral -> default (0).
+    Con codes, tambien aplica la compuerta de movimiento (ventana quieta -> default)."""
     P = np.asarray(P)
-    return np.where(P.max(1) >= umbral, P.argmax(1), 0)
+    k = np.where(P.max(1) >= umbral, P.argmax(1), 0)
+    if codes is not None:
+        k = np.where(ventana_quieta(codes), 0, k)
+    return k
 
 
 def gradient_check(seed=3, n_check=60, eps=1e-6):
