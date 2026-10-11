@@ -124,7 +124,7 @@ def simular(net, niveles=None, pi_gains=(KP, KI), fixed_ref=None, T_total=None,
     for k in range(1, n_ticks + 1):
         t = k * TICK
         lv = niveles[k - 1] if niveles is not None else np.zeros(3)
-        raw = np.clip(np.rint(lv * core.ADC_FS + r.normal(0, ADC_NOISE, 3)), 0, 4095).astype(np.int64)
+        raw = np.clip(np.rint(core.level_to_raw(lv) + r.normal(0, ADC_NOISE, 3)), 0, 4095).astype(np.int64)
         acc += raw; n_acc += 1
         nuevo = False
         if n_acc == core.SEQ_DEC:
@@ -138,7 +138,7 @@ def simular(net, niveles=None, pi_gains=(KP, KI), fixed_ref=None, T_total=None,
                 p, _ = net.forward(core.codes_to_x(snap, np.float32))
                 busy = False
                 c = int(np.argmax(p)); pmax = float(p[c])
-                cls_raw = c if pmax >= CONF_THRESHOLD else 0
+                cls_raw = c if (pmax >= CONF_THRESHOLD and not core.ventana_quieta(snap)) else 0
                 if cls_raw == cls_cand:
                     cand += 1
                 else:
