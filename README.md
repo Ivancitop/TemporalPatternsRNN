@@ -8,12 +8,27 @@ máquina de estados IDLE / RUN / FIXEDREF / OPENLOOP.
 
 ```
 x_t (3 potes, 50 pasos de 100 ms = 5 s)
-  -> LSTM 8 unidades (i, f, g, o)          501 parámetros
-  -> Dense 8, tanh                           136
+  -> LSTM 8 unidades (i, f, g, o)          352 parámetros
+  -> Dense 8, tanh                           72
   -> Dense 5 + softmax                        45      total 501 (5.8 KB en float32)
 Pérdida: E = ½ Σ_k (p_k − t_k)²   (suma de errores al cuadrado, a través del jacobiano del softmax)
-Entrenamiento: SGD por secuencia, BPTT completo, recorte de norma global (lr 0.1, clip 1.0, 20 épocas)
+Entrenamiento: SGD por secuencia, BPTT completo, recorte de norma global (lr 0.1, clip 1.0, 60 épocas)
 ```
+
+En RUN la ventana de 5 s se desliza sobre las secuencias de los pots; casi nunca coincide exactamente
+con un gesto del dataset. Por eso:
+
+1. **Aumento de datos por época** (`lstm_core.aumentar`, determinista: PC y MCU reciben lo mismo).
+   Gestos: desfase de −0.8 s a +1.5 s, velocidad 0.6–1.15× (gesto en 3–5.7 s), ganancia 0.95–1.03 y
+   offset ±1.5 %. Default: potes quietos donde empieza o termina un gesto, y "acomodos" rápidos de los
+   tres potes juntos (lo que haces antes de cada gesto). Sin esto, con 8 unidades, Alta CCW caía a 7 %
+   con la ventana desfasada 1 s.
+2. **Compuerta de movimiento** (`MOVE_GATE_MIN` en `main.c`, 40 milésimas): si ningún pote se movió en
+   los 5 s de la ventana, la clase es default sin consultar a la red. Es la definición de default del
+   dataset (potes quietos) y evita que una posición fija haga girar el motor.
+3. **Calibración del ADC** (`SEQ_ADC_MIN` / `SEQ_ADC_MAX` en `seq.h`, `ADC_MIN` / `ADC_MAX` en
+   `lstm_core.py`): el tope físico de tus potes (11–2670) se mapea a 0–1.02, el rango del dataset.
+   El promedio de 20 lecturas (100 ms) es el pasa bajas; no hay otro filtro.
 
 | Índice interno (CSV) | Clase del enunciado | Gesto en el dataset | Referencia |
 |---|---|---|---|
