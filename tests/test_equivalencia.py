@@ -40,7 +40,7 @@ def test_secuencia(n=30, seed=11):
         ticks = core.SEQ_DEC * (core.T + int(r.integers(0, 8))) + int(r.integers(0, core.SEQ_DEC))
         lv = r.random(3) * 1.1
         tr = np.linspace(0, 1, ticks)[:, None] * (r.random(3) - 0.5)       # rampa
-        raw = np.clip(np.rint((lv + tr) * core.ADC_FS + r.normal(0, 25, (ticks, 3))), 0, 4095).astype(int)
+        raw = np.clip(np.rint(core.level_to_raw(lv + tr) + r.normal(0, 25, (ticks, 3))), 0, 4095).astype(int)
         for a, b, c in raw:
             link.send(f"A,{a},{b},{c}")
         resp = link.line("C").split(",")
