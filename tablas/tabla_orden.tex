@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering
+\caption{Prueba de orden temporal sobre el conjunto de prueba.}
+\label{tab:orden}
+\scriptsize
+\begin{tabular}{lcccc}
+\toprule
+ & \multicolumn{2}{c}{Exactitud [\%]} & \multicolumn{2}{c}{Misma decisión [\%]} \\
+Ventana & LSTM & MLP & LSTM & MLP \\
+\midrule
+Original & 98.7 & 81.3 & 100.0 & 100.0 \\
+Invertida en el tiempo & 20.0 & 81.3 & 18.7 & 100.0 \\
+Pasos barajados & 34.5 & 81.3 & 33.2 & 100.0 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -4,6 +4,11 @@
 #ifndef PESOS_TRAINED_H
 #define PESOS_TRAINED_H
 
+#include "lstm.h"
+
+/* Error de compilacion si estos pesos no corresponden a LSTM_N_H de lstm.h */
+typedef char lstm_chk_TRAINED[((501U) == LSTM_N_PARAMS) ? 1 : -1];
+
 static const float LSTM_W_TRAINED[501] = {
     2.880274318e-02f, 7.346748114e-01f, -4.313175976e-01f, 2.600984275e-01f,
     -1.653885394e-01f, -6.650333107e-02f, 2.024236321e-01f, -9.827512503e-02f,

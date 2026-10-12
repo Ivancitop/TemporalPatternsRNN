@@ -4,6 +4,11 @@
 #ifndef PESOS_INIT_H
 #define PESOS_INIT_H
 
+#include "lstm.h"
+
+/* Error de compilacion si estos pesos no corresponden a LSTM_N_H de lstm.h */
+typedef char lstm_chk_INIT[((501U) == LSTM_N_PARAMS) ? 1 : -1];
+
 static const float LSTM_W_INIT[501] = {
     9.789234959e-03f, 3.730193675e-01f, -2.946638465e-01f, 3.715170324e-01f,
     -1.558183581e-01f, -6.349173188e-02f, 2.713635266e-01f, -7.519026101e-02f,
