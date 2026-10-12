@@ -140,16 +140,25 @@ AUG_OFF = 15                # +- milesimas de offset
 AUG_P_DEFAULT = 0.4         # defaults reemplazados por potes quietos al inicio/fin de un gesto
 AUG_P_SALTO = 0.3           # defaults reemplazados por un acomodo rapido de los 3 potes
 AUG_P_QUIETO = 0.0          # defaults reemplazados por potes quietos en posicion aleatoria
+AUG_P_PARCIAL = 0.0         # gestos cortados -> default (0 = desactivado, config. entregada)
+AUG_PARCIAL = (-40, -20)    # desfase de esos gestos (la ventana termina 2-4 s antes del fin)
 AUG_SEED = 3
 
 
 def aumentar(C, y, r, gestos):
+    """Devuelve (codigos, etiqueta). La etiqueta cambia a default si el gesto queda a medias."""
     C = np.asarray(C, dtype=float)
     if y != 0:
         v = r.uniform(*AUG_SPEED)
         src = np.clip(np.arange(T) / v, 0, T - 1)
         C = np.stack([np.interp(src, np.arange(T), C[:, k]) for k in range(N_IN)], 1)
-        C = desplazar(C, int(r.integers(AUG_SHIFT[0], AUG_SHIFT[1] + 1)))
+        if AUG_P_PARCIAL > 0 and r.random() < AUG_P_PARCIAL:
+            # el gesto apenas empieza (pot 1 o pots 1-2): aun no hay evidencia -> default.
+            # Sin esto, una ventana de "potes en 0 + pot1 subiendo" se parece al final de Alta CCW
+            C = desplazar(C, int(r.integers(AUG_PARCIAL[0], AUG_PARCIAL[1] + 1)))
+            y = 0
+        else:
+            C = desplazar(C, int(r.integers(AUG_SHIFT[0], AUG_SHIFT[1] + 1)))
     else:
         u = r.random()
         if u < AUG_P_DEFAULT:                       # quietos donde empieza/termina un gesto
@@ -168,14 +177,15 @@ def aumentar(C, y, r, gestos):
             w = np.clip((np.arange(T) - t0) / n, 0, 1)[:, None]
             C = ini[None] + w * (fin - ini)[None]
     C = C * r.uniform(*AUG_GAIN) + r.uniform(-AUG_OFF, AUG_OFF)
-    return np.clip(np.rint(C), 0, CODE_MAX).astype(np.int64)
+    return np.clip(np.rint(C), 0, CODE_MAX).astype(np.int64), int(y)
 
 
 def epoca_aumentada(d, ep):
-    """Codigos de entrenamiento de la epoca ep (deterministas: PC y MCU ven lo mismo)."""
+    """(codigos, etiquetas) de entrenamiento de la epoca ep (deterministas: PC y MCU ven lo mismo)."""
     r = np.random.default_rng(AUG_SEED * 100003 + ep)
     gestos = d["C_train"][d["y_train"] != 0]
-    return np.array([aumentar(c, y, r, gestos) for c, y in zip(d["C_train"], d["y_train"])])
+    out = [aumentar(c, y, r, gestos) for c, y in zip(d["C_train"], d["y_train"])]
+    return np.array([o[0] for o in out]), np.array([o[1] for o in out])
 
 
 def epoch_orders(n, epochs, seed):
@@ -241,7 +251,10 @@ def _sig(z):
 
 
 class LSTMNet:
-    """LSTM(16) -> Dense(8, tanh) -> Dense(5) + softmax. SSE + BPTT.
+    """LSTM(n_h) -> Dense(8, tanh) -> Dense(5) + softmax. SSE + BPTT.
+
+    n_in (sensores) y n_h (unidades) son configurables para el estudio de hiperparametros;
+    el firmware usa n_in = 3 y n_h = LSTM_N_H.
 
     Orden de compuertas en las filas de Wx, Wh, b: i, f, g, o (como Keras).
     Orden plano de parametros (igual a LstmParams en C):
@@ -250,13 +263,14 @@ class LSTMNet:
 
     NAMES = ("Wx", "Wh", "b", "Wd", "bd", "Wo", "bo")
 
-    def __init__(self, seed=1, dtype=np.float64, n_h=N_H):
+    def __init__(self, seed=1, dtype=np.float64, n_h=N_H, n_in=N_IN):
         self.dt = dtype
         self.H = n_h
+        self.n_in = n_in
         H, G = n_h, 4 * n_h
         r = np.random.default_rng(seed)
         lim = lambda a, b: np.sqrt(6.0 / (a + b))
-        Wx = r.uniform(-lim(N_IN, G), lim(N_IN, G), (G, N_IN))
+        Wx = r.uniform(-lim(n_in, G), lim(n_in, G), (G, n_in))
         # Recurrente ortogonal (por compuerta), estabiliza el BPTT
         Wh = np.vstack([np.linalg.qr(r.normal(size=(H, H)))[0] for _ in range(4)])
         b = np.zeros(G); b[H:2 * H] = 1.0                 # sesgo de olvido = 1
@@ -401,7 +415,9 @@ class LSTMNet:
                 f" * Orden plano: Wx[{4*self.H}x{N_IN}], Wh[{4*self.H}x{self.H}], b[{4*self.H}], "
                 f"Wd[{N_D}x{self.H}], bd[{N_D}], Wo[{N_OUT}x{N_D}], bo[{N_OUT}]\n"
                 f" * Generado automaticamente por lstm_core.py: no editar a mano. */\n"
-                f"#ifndef {g}\n#define {g}\n\n"
+                f"#ifndef {g}\n#define {g}\n\n#include \"lstm.h\"\n\n"
+                f"/* Error de compilacion si estos pesos no corresponden a LSTM_N_H de lstm.h */\n"
+                f"typedef char lstm_chk_{tag}[(({len(flat)}U) == LSTM_N_PARAMS) ? 1 : -1];\n\n"
                 f"static const float LSTM_W_{tag}[{len(flat)}] = {{\n" + "\n".join(body)
                 + "\n};\n\n#endif\n")
 
@@ -436,7 +452,11 @@ def ventana_quieta(codes, umbral=MOVE_GATE_MIN):
     return rango < umbral if umbral > 0 else np.zeros(rango.shape, bool)
 
 
-def con_umbral(P, umbral=0.70, codes=None):
+UMBRAL = 0.70               # CONF_THRESHOLD de main.c
+ANTIRREBOTE = 3             # DEBOUNCE_N de main.c
+
+
+def con_umbral(P, umbral=UMBRAL, codes=None):
     """Misma decision que el firmware: si p_max < umbral -> default (0).
     Con codes, tambien aplica la compuerta de movimiento (ventana quieta -> default)."""
     P = np.asarray(P)
