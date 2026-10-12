@@ -34,7 +34,7 @@ CLIP = 1.0
 SEED_WEIGHTS = 1
 SEED_DATA = 0
 SEED_ORDER = 7
-DATOS = "dataset/dataset_balanceado_500.csv"
+DATOS = "dataset_balanceado_500.csv"
 FIRMWARE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "firmware")
 
 
@@ -43,29 +43,46 @@ def preparar(datos=DATOS):
     return split_dataset(codes, y, ids, SEED_DATA)
 
 
-def train(net, d, orders, lr, clip=CLIP, log=True):
+def train(net, d, orders, lr, clip=CLIP, log=True, eval_test=False):
+    """SGD por secuencia + BPTT. Registra por epoca:
+      loss_train      SSE media de la epoca (cada muestra evaluada ANTES de actualizar)
+      acc_train_linea exactitud en linea de esa misma pasada (igual a la del MCU)
+      acc_train       exactitud de una pasada completa sobre el train (aumentado) al final de la epoca
+      loss_val/acc_val, y acc_test por epoca si eval_test (estudio del numero de epocas)
+      t_epoca_s       tiempo de SGD de la epoca (sin evaluaciones)
+    wall_time_s = tiempo total con evaluaciones; t_entrenamiento_s = solo SGD."""
     hist = {"loss_train": [], "loss_val": [], "acc_train": [], "acc_val": [],
+            "acc_train_linea": [], "acc_test": [], "t_epoca_s": [],
             "prob_log": [], "loss_log": []}
     Xtr, Ytr = d["X_train"], d["y_train"]
     t0 = time.perf_counter()
     for ep, order in enumerate(orders):
         acc = 0.0
+        aciertos = 0
         if AUMENTO:
-            Xtr = core.codes_to_x(core.epoca_aumentada(d, ep), np.float64)
+            Ce, Ytr = core.epoca_aumentada(d, ep)
+            Xtr = core.codes_to_x(Ce, np.float64)
+        t_ep = time.perf_counter()
         for idx in order:
             p, loss = net.train_sample(Xtr[idx], Ytr[idx], lr, clip)
             acc += loss
+            aciertos += int(np.argmax(p) == Ytr[idx])
             if log:
                 hist["prob_log"].append([float(v) for v in p])
                 hist["loss_log"].append(loss)
+        hist["t_epoca_s"].append(time.perf_counter() - t_ep)
         hist["loss_train"].append(acc / len(order))
+        hist["acc_train_linea"].append(100.0 * aciertos / len(order))
         lv, av, _ = net.evaluate(d["X_val"], d["y_val"])
         _, at, _ = net.evaluate(Xtr, Ytr)
         hist["loss_val"].append(lv); hist["acc_val"].append(av); hist["acc_train"].append(at)
+        if eval_test:
+            hist["acc_test"].append(net.evaluate(d["X_test"], d["y_test"])[1])
         if log:
-            print(f"  epoca {ep:3d}  loss_tr={hist['loss_train'][-1]:.5f}  "
+            print(f"  epoca {ep:3d}  loss_tr={hist['loss_train'][-1]:.5f}  acc_tr={at:5.1f}%  "
                   f"loss_val={lv:.5f}  acc_val={av:5.1f}%")
     hist["wall_time_s"] = time.perf_counter() - t0
+    hist["t_entrenamiento_s"] = float(np.sum(hist["t_epoca_s"]))
     return hist
 
 
@@ -108,7 +125,7 @@ def run(dtype, tag, d, orders):
     w0 = net.get_weights()
     print(f"\n[{tag}] dtype={np.dtype(dtype).name}  LSTM({core.N_IN}->{core.N_H})"
           f"-Dense({core.N_D})-Dense({core.N_OUT})  {net.n_params()} parametros")
-    hist = train(net, d, orders, LR)
+    hist = train(net, d, orders, LR, eval_test=True)
     _, acc_te, Pte = net.evaluate(d["X_test"], d["y_test"])
     M = matriz_confusion(d["y_test"], Pte.argmax(1))
     Mu = matriz_confusion(d["y_test"], con_umbral(Pte, codes=d["C_test"]))
@@ -125,7 +142,11 @@ def run(dtype, tag, d, orders):
         "desplazamiento": robustez_desplazamiento(net, d),
         "quietos_default": quietos_default(net, d),
     })
-    print(f"  prueba: {acc_te:.1f} %   (con umbral 0.7: {100 * metricas_clase(Mu)['accuracy']:.1f} %)")
+    print(f"  prueba: {acc_te:.1f} %   (umbral {core.UMBRAL} + compuerta: {100 * metricas_clase(Mu)['accuracy']:.1f} %)")
+    print(f"  parametros: {net.n_params()}   tiempo de entrenamiento: {hist['t_entrenamiento_s']:.1f} s "
+          f"(SGD) / {hist['wall_time_s']:.1f} s (con evaluaciones)")
+    print(f"  final: loss_tr {hist['loss_train'][-1]:.4f}  loss_val {hist['loss_val'][-1]:.4f}  "
+          f"acc_tr {hist['acc_train'][-1]:.1f} %  acc_val {hist['acc_val'][-1]:.1f} %")
     return net, hist
 
 

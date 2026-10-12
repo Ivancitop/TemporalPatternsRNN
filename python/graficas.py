@@ -12,6 +12,12 @@ los resultados correspondientes.
   resultados_sim.json    lazo simulado          (simulacion_lazo.py)
   tlm_escalon_*.csv      escalon real           (telemetria.py escalon)
 
+Figuras: fig_dataset, fig_curvas_pc, fig_curvas_mcu (perdida y exactitud de
+entrenamiento/validacion), fig_convergencia, fig_confusion, fig_prf1
+(precision/recall/F1 por clase), fig_desplazamiento, fig_lazo, fig_control.
+Tablas LaTeX: tablas/tabla_entrenamiento.tex, tablas/tabla_metricas.tex.
+estudio_hiperparametros.py, robustez.py y analisis_mcu.py generan las suyas.
+
 Colores: paleta categorica validada (deuteranopia/protanopia) para las 4
 clases de gesto, gris neutro para default; ademas, velocidad alta en linea
 continua y nominal en discontinua para que la clase no dependa solo del color.
@@ -30,17 +36,26 @@ import numpy as np
 
 import lstm_core as core
 from lstm_core import load_json
+from run_pc import SEED_ORDER, AUMENTO, preparar, DATOS
 
 COL = 3.4
 OUT = "figuras"
-plt.rcParams.update({
+AZUL, NARANJA, VERDE, AMARILLO, GRIS = "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#8a8985"
+ESTILO_RC = {
     "font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8,
     "legend.fontsize": 6.5, "xtick.labelsize": 7, "ytick.labelsize": 7,
     "savefig.bbox": "tight", "savefig.pad_inches": 0.02,
     "axes.grid": True, "grid.alpha": 0.3, "grid.linewidth": 0.4,
     "lines.linewidth": 1.1, "legend.framealpha": 0.9,
     "axes.spines.top": False, "axes.spines.right": False,
-})
+}
+
+
+def aplicar_estilo():
+    plt.rcParams.update(ESTILO_RC)
+
+
+aplicar_estilo()
 # default, alta CW, nominal CW, alta CCW, nominal CCW
 COLORES = ["#8a8985", "#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 ESTILO = ["-", "-", "--", "-", "--"]
@@ -54,9 +69,13 @@ def cargar(p):
 
 
 def save(fig, name):
+    os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, name)
     fig.savefig(path + ".pdf"); fig.savefig(path + ".png", dpi=200)
     plt.close(fig); print(f"  {path}.pdf")
+
+
+guardar = save
 
 
 def nombre_origen(r, defecto):
@@ -210,6 +229,90 @@ def fig_control(sim, tlm_escalon=None):
     save(fig, "fig_control")
 
 
+def acc_train_en_linea(r, d):
+    """Exactitud de entrenamiento por epoca a partir de prob_log (forward antes de actualizar),
+    para resultados_mcu.json viejos que no la registraban."""
+    if r.get("acc_train") or not r.get("prob_log"):
+        return r.get("acc_train")
+    P = np.asarray(r["prob_log"]); n = len(d["C_train"])
+    ep_n = len(P) // n
+    orders = core.epoch_orders(n, ep_n, SEED_ORDER)
+    acc = []
+    for ep, order in enumerate(orders):
+        y = core.epoca_aumentada(d, ep)[1] if AUMENTO else d["y_train"]
+        acc.append(100.0 * float(np.mean(P[ep * n:(ep + 1) * n].argmax(1) == np.asarray(y)[order])))
+    return acc
+
+
+def fig_curvas(r, nombre, titulo, d=None):
+    """Curva de entrenamiento y de validacion: perdida (izq.) y exactitud (der.)."""
+    acc_tr = acc_train_en_linea(r, d) if d is not None else r.get("acc_train")
+    ep = np.arange(1, len(r["loss_train"]) + 1)
+    ep_v = np.array(r.get("epoca_val", list(range(len(r["loss_val"]))))) + 1
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(COL, 1.55))
+    a1.semilogy(ep, r["loss_train"], c=AZUL, label="entrenamiento")
+    a1.semilogy(ep_v, r["loss_val"], "--", c=NARANJA, label="validación")
+    a1.set_xlabel("Época"); a1.set_ylabel("SSE media")
+    if acc_tr:
+        a2.plot(ep[:len(acc_tr)], acc_tr, c=AZUL, label="entrenamiento")
+    a2.plot(ep_v, r["acc_val"], "--", c=NARANJA, label="validación")
+    a2.set_xlabel("Época"); a2.set_ylabel("Exactitud [%]"); a2.set_ylim(top=101)
+    a2.legend(loc="lower right", fontsize=5.5)
+    fig.suptitle(titulo, fontsize=7, y=1.0)
+    fig.tight_layout()
+    save(fig, nombre)
+
+
+def fig_prf1(met, nombre="fig_prf1"):
+    orden = [1, 2, 3, 4, 0]
+    x = np.arange(len(orden)); w = 0.26
+    fig, ax = plt.subplots(figsize=(COL, 1.45))
+    for j, (k, c, lab) in enumerate((("precision", AZUL, "Precisión"), ("recall", NARANJA, "Recall"),
+                                     ("f1", VERDE, "F1"))):
+        ax.bar(x + (j - 1) * w, [100 * met[k][c_] for c_ in orden], w, color=c, label=lab)
+    ax.set_xticks(x); ax.set_xticklabels([ETQ_CORTA[c] for c in orden])
+    lo = min(100 * min(met[k][c] for c in orden) for k in ("precision", "recall", "f1"))
+    ax.set_ylim(max(0, lo - 10), 102); ax.set_ylabel("[%]")
+    ax.legend(loc="lower left", ncol=3, fontsize=5.5)
+    save(fig, nombre)
+
+
+def tabla_entrenamiento(pc, pc32, mcu):
+    os.makedirs("tablas", exist_ok=True)
+    filas = []
+    for r, n in ((pc, "PC f64"), (pc32, "PC f32"), (mcu, "S32K312")):
+        if not r:
+            continue
+        t = r.get("t_entrenamiento_s", r.get("wall_time_s"))
+        acc_tr = r.get("acc_train") or [float("nan")]
+        filas.append(f"{n} & {r['loss_train'][-1]:.4f} & {r['loss_val'][-1]:.4f} & {acc_tr[-1]:.1f} & "
+                     f"{r['acc_val'][-1]:.1f} & {r['acc_test']:.1f} & {t:.0f} " + r"\\")
+    lin = [r"\begin{table}[t]", r"\centering", r"\caption{Resultados del entrenamiento (60 épocas, " +
+           f"{core.N_PARAMS}" + r" parámetros).}", r"\label{tab:entrenamiento}", r"\scriptsize",
+           r"\setlength{\tabcolsep}{2.5pt}", r"\begin{tabular}{lcccccr}", r"\toprule",
+           r"Plataforma & SSE ent. & SSE val. & Exact. ent. & Exact. val. & Exact. prueba & $t$ [s] \\",
+           r"\midrule"] + filas + [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    open("tablas/tabla_entrenamiento.tex", "w", encoding="utf-8").write("\n".join(lin) + "\n")
+
+
+def tabla_metricas(fuentes):
+    """fuentes: lista de (nombre, metricas) -> precision/recall/F1 por clase."""
+    os.makedirs("tablas", exist_ok=True)
+    orden = [1, 2, 3, 4, 0]
+    cab = " & ".join(n for n, _ in fuentes)
+    lin = [r"\begin{table}[t]", r"\centering", r"\caption{Precisión / recall / F1 por clase en prueba.}",
+           r"\label{tab:metricas}", r"\scriptsize", r"\setlength{\tabcolsep}{3pt}",
+           r"\begin{tabular}{l" + "c" * len(fuentes) + "}", r"\toprule", r"Clase & " + cab + r" \\", r"\midrule"]
+    for c in orden:
+        celdas = [f"{m['precision'][c]:.2f}/{m['recall'][c]:.2f}/{m['f1'][c]:.2f}" for _, m in fuentes]
+        lin.append(f"{core.CLASE_ENUNCIADO[c]} {core.CLASES[c]} & " + " & ".join(celdas) + r" \\")
+    lin.append(r"\midrule")
+    lin.append(r"Exactitud & " + " & ".join(f"{100 * m['accuracy']:.1f}\\,\\%" for _, m in fuentes) + r" \\")
+    lin.append(r"F1 macro & " + " & ".join(f"{m['macro_f1']:.3f}" for _, m in fuentes) + r" \\")
+    lin += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    open("tablas/tabla_metricas.tex", "w", encoding="utf-8").write("\n".join(lin) + "\n")
+
+
 # ---------------------------------------------------------------------
 def main():
     global OUT
@@ -227,9 +330,23 @@ def main():
 
     print(f"Generando figuras en {OUT}/  (MCU: {nombre_origen(mcu, 'no') if mcu else 'no'}, "
           f"real: {'sí' if ev and 'real' in ev else 'no'})")
+    d = preparar(DATOS)
     fig_dataset(pc)
+    fig_curvas(pc, "fig_curvas_pc", "PC (float64)")
+    if mcu:
+        mcu["acc_train"] = acc_train_en_linea(mcu, d)
+        fig_curvas(mcu, "fig_curvas_mcu", f"{nombre_origen(mcu, 'MCU')} (float32, en el dispositivo)")
     fig_convergencia(pc, pc32, host, mcu)
     fig_confusion(pc, host, mcu, ev)
+    fuentes = [("PC", pc["metricas_test"])]
+    if mcu:
+        fuentes.append((nombre_origen(mcu, "MCU"), mcu["metricas_test"]))
+    if ev and "metricas_mcu" in ev.get("prueba", {}):
+        fuentes[-1] = (nombre_origen(mcu, "MCU"), ev["prueba"]["metricas_mcu"])
+    fig_prf1(fuentes[-1][1])
+    tabla_metricas(fuentes)
+    tabla_entrenamiento(pc, pc32, mcu)
+    print("  tablas/tabla_entrenamiento.tex, tablas/tabla_metricas.tex")
     fig_desplazamiento(pc)
     if sim:
         fig_lazo(sim)

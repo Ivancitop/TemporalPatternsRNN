@@ -90,7 +90,8 @@ def main():
           f"~{t_link * (args.epocas * len(Ctr) + n_val) / 60:.1f} min (sin contar el computo)\n")
 
     link, origen = enlace.abrir(args)
-    hist = {"loss_train": [], "loss_val": [], "acc_val": [], "epoca_val": [], "prob_log": [],
+    hist = {"loss_train": [], "acc_train": [], "loss_val": [], "acc_val": [], "epoca_val": [],
+            "t_epoca_s": [], "prob_log": [],
             "loss_log": [], "rtt_log": [], "cyc_fwd": [], "cyc_bwd": []}
     try:
         assert link.line("R") == "OK", "el MCU no respondio a R"
@@ -98,15 +99,20 @@ def main():
         t0 = time.perf_counter()
         for ep, order in enumerate(orders):
             acc = 0.0
+            aciertos = 0
+            t_ep = time.perf_counter()
             if AUMENTO:                       # mismas secuencias aumentadas que run_pc.py
-                Ctr = core.epoca_aumentada(d, ep)
+                Ctr, Ytr = core.epoca_aumentada(d, ep)
             for idx in order:
-                _, p, loss, cf, cb, rtt = enlace.muestra(link, "T", Ctr[idx], Ytr[idx])
+                cls, p, loss, cf, cb, rtt = enlace.muestra(link, "T", Ctr[idx], Ytr[idx])
                 acc += loss
+                aciertos += int(cls == int(Ytr[idx]))   # forward ANTES de actualizar (en linea)
                 hist["prob_log"].append(p); hist["loss_log"].append(loss)
                 hist["rtt_log"].append(rtt); hist["cyc_fwd"].append(cf); hist["cyc_bwd"].append(cb)
             hist["loss_train"].append(acc / len(order))
-            msg = f"  epoca {ep:3d}  loss_tr={hist['loss_train'][-1]:.5f}"
+            hist["acc_train"].append(100.0 * aciertos / len(order))
+            hist["t_epoca_s"].append(time.perf_counter() - t_ep)
+            msg = f"  epoca {ep:3d}  loss_tr={hist['loss_train'][-1]:.5f}  acc_tr={hist['acc_train'][-1]:5.1f}%"
             ultima = ep == len(orders) - 1
             if (args.val_cada > 0 and (ep + 1) % args.val_cada == 0) or ultima:
                 lv, av, _, _ = evaluar(link, d["C_val"], d["y_val"])
@@ -141,6 +147,7 @@ def main():
         hist["bwd_mean_us"] = hist["cyc_bwd_mean"] / CORE_MHZ
         print(f"Forward: {hist['fwd_mean_us']:.0f} us   BPTT+actualizacion: {hist['bwd_mean_us']:.0f} us "
               f"(media, {CORE_MHZ:.0f} MHz{'; medido en la PC' if origen == 'host_c' else ''})")
+    hist["n_params"] = core.N_PARAMS
     hist["config"] = {"epochs": len(orders), "lr": LR, "clip": CLIP, "baud": args.baud,
                       "origen": origen, "core_mhz": CORE_MHZ}
     save_json("resultados_mcu.json", hist)
