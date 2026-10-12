@@ -1,0 +1,29 @@
+\begin{table}[t]
+\centering
+\caption{Desempeño temporal y recursos en el S32K312 (120 MHz).}
+\label{tab:mcu}
+\scriptsize
+\begin{tabular}{lr}
+\toprule
+\multicolumn{2}{l}{\textit{Temporal}} \\
+Muestreo ADC (3 canales) & 5 ms \\
+Actualización de ventana (1 paso) & 100 ms \\
+Adquisición de una ventana completa & 5 s \\
+Inferencia (DWT, media / máx.) & 4.52 / 4.74 ms \\
+Inferencia por tick (5 pasos) & 0.45 ms \\
+Forward + BPTT en entrenamiento & 4.38 + 2.66 ms \\
+Latencia arquitectura (peor caso) & 350 ms \\
+Sensor $\rightarrow$ decisión (inicio del gesto) & 2.42 s \\
+Sensor $\rightarrow$ decisión (fin del gesto) & -0.73 s \\
+Decisión $\rightarrow$ actuación (PWM) & $<$ 10 ms (mismo ciclo de control) \\
+Frecuencia de inferencia (impl. / máx.) & 10 / 221 Hz \\
+\multicolumn{2}{l}{\textit{Recursos}} \\
+Flash (text + data) & 89.5 KB (4.4\,\%) \\
+RAM (data + bss) & 33.1 KB (17.3\,\%) \\
+Carga de CPU en RUN (media / máx.) & 5.6 / 5.9\,\% \\
+Parámetros / tamaño (float32) & 501 / 1.96 KB \\
+Caché BPTT + gradiente & 12.9 KB \\
+Energía por inferencia & $V I t_{inf}$ \pend{medir} \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering
+\caption{Resultados del entrenamiento (60 épocas, 501 parámetros).}
+\label{tab:entrenamiento}
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{lcccccr}
+\toprule
+Plataforma & SSE ent. & SSE val. & Exact. ent. & Exact. val. & Exact. prueba & $t$ [s] \\
+\midrule
+PC f64 & 0.0185 & 0.0247 & 98.0 & 97.3 & 100.0 & 55 \\
+PC f32 & 0.0948 & 0.0288 & 92.6 & 96.0 & 96.0 & 66 \\
+S32K312 & 0.0245 & 0.0134 & 97.1 & 98.7 & 98.7 & 1398 \\
+\bottomrule
+\end{tabular}
+\end{table}
