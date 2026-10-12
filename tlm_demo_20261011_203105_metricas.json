@@ -1,0 +1,96 @@
+{
+  "latencias": [
+    {
+      "t_ms": 277850.0,
+      "clase": 1,
+      "nombre": "Alta CW",
+      "deteccion_ms": 450.0,
+      "accion_ms": NaN
+    },
+    {
+      "t_ms": 292650.0,
+      "clase": 3,
+      "nombre": "Alta CCW",
+      "deteccion_ms": 610.0,
+      "accion_ms": NaN
+    },
+    {
+      "t_ms": 306350.0,
+      "clase": 2,
+      "nombre": "Nominal CW",
+      "deteccion_ms": 14310.0,
+      "accion_ms": 550.0
+    },
+    {
+      "t_ms": 311050.0,
+      "clase": 4,
+      "nombre": "Nominal CCW",
+      "deteccion_ms": 19010.0,
+      "accion_ms": 640.0
+    },
+    {
+      "t_ms": 316750.0,
+      "clase": 4,
+      "nombre": "Nominal CCW",
+      "deteccion_ms": 24710.0,
+      "accion_ms": 54250.0
+    },
+    {
+      "t_ms": 318050.0,
+      "clase": 1,
+      "nombre": "Alta CW",
+      "deteccion_ms": 520.0,
+      "accion_ms": NaN
+    },
+    {
+      "t_ms": 332650.0,
+      "clase": 1,
+      "nombre": "Alta CW",
+      "deteccion_ms": 14350.0,
+      "accion_ms": NaN
+    },
+    {
+      "t_ms": 335250.0,
+      "clase": 1,
+      "nombre": "Alta CW",
+      "deteccion_ms": 16950.0,
+      "accion_ms": NaN
+    },
+    {
+      "t_ms": 356650.0,
+      "clase": 1,
+      "nombre": "Alta CW",
+      "deteccion_ms": 520.0,
+      "accion_ms": NaN
+    },
+    {
+      "t_ms": 370450.0,
+      "clase": 4,
+      "nombre": "Nominal CCW",
+      "deteccion_ms": 12870.0,
+      "accion_ms": 550.0
+    },
+    {
+      "t_ms": 373850.0,
+      "clase": 2,
+      "nombre": "Nominal CW",
+      "deteccion_ms": 16270.0,
+      "accion_ms": 550.0
+    }
+  ],
+  "conteo_clase_raw": [
+    8930,
+    1700,
+    530,
+    500,
+    340
+  ],
+  "deteccion_media_ms": 10960.90909090909,
+  "accion_media_ms": 11308.0,
+  "carga_cpu_media_pct": 5.6487000000000025,
+  "carga_cpu_max_pct": 5.9,
+  "cic_fwd_media": 542269.2516666667,
+  "fwd_us": 4518.910430555556,
+  "periodo_tlm_ms_media": 10.0,
+  "tramas_perdidas_pct": 0.0
+}
